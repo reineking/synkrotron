@@ -1,0 +1,13 @@
+A tool for synchronizing local and remote directories with client-side encryption support.
+
+Synkrotron directly supports client-side encryption of remote directories and is much faster
+compared to using other synchronization tools on-top of an additional encryption layer.
+
+Uses rsync for transferring files between directories.
+For accessing remote directories, ssh and sshfs are used (the server should support
+password-less authentication over ssh).
+For encrypting files at the remote location, encfs is used.
+
+
+Requires Python 3.2 or higher, rsync, ssh/sshfs (for remote directories), and encfs (for
+encryption).

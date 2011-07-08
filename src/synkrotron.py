@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright (C) 2010-2011  Thomas Reineking
+# Copyright (C) 2011  Thomas Reineking
 #
 # This file is part of the synkrotron application.
 # 

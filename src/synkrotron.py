@@ -661,7 +661,11 @@ def main():
             repo_remote = Repo(remote, follow_links=remote_config['follow_links'], exclude=remote_config['exclude'], rel_path=rel_path)
             ignore_time = args.ignore_time or remote_config['ignore_time']
             content = args.content or remote_config['content']
+            if content:
+                remote.reverse_mount()
             diff = Diff(repo_local, repo_remote, ignore_time=ignore_time, content=content, modify_window=remote_config['modify_window'])
+            if content:
+                remote.reverse_umount()
             delete = args.delete or remote_config['delete']
             if args.command in {'pull', 'push'}:
                 diff._copy(operation=args.command, simulate=args.simulate, delete=delete, delta=args.delta)

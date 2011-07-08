@@ -122,6 +122,27 @@ class TestSynkrotron(unittest.TestCase):
         self.assertEqual(('dir',), tuple(os.listdir(self.remote)))
         self.assertEqual(('file_ä',), tuple(os.listdir(os.path.join(self.remote, 'dir'))))
     
+    def test_main_push_sshfs_encfs_content(self):
+        self._populate(self.local3_base)
+        os.chdir(self.local3_base)
+        sys.argv[1:] = ['push', 'remote']
+        synkrotron.main()
+        file_local = os.path.join(self.local3_base, 'file_ä')
+        file_remote = os.path.join(self.mount_point, 'file_ä')
+        with io.open(file_local, 'w') as f:
+            f.write('xontent')
+        os.utime(file_local, (os.path.getatime(file_remote), os.path.getmtime(file_remote)))
+        sys.argv[1:] = ['push', 'remote']
+        synkrotron.main()
+        with io.open(file_remote, 'r') as f:
+            self.assertEqual('content', f.read())
+        sys.argv[1:] = ['push', 'remote', '--content']
+        synkrotron.main()
+        with io.open(file_remote, 'r') as f:
+            self.assertEqual('xontent', f.read())
+        sys.argv[1:] = ['umount', 'remote']
+        synkrotron.main()
+    
 
 class TestDiff(TestSynkrotron):
     

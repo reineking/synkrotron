@@ -16,7 +16,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 """
-Unit tests for "pyds.py".
+Unit tests for "synkrotron.py".
 """
 
 import configparser

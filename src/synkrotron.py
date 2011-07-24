@@ -263,7 +263,11 @@ class Repo:
                     for ign in reversed(list(self._ignore_files(rel_dir, names))):
                         del names[bisect.bisect_left(names, ign)]
                 for name in names:
-                    yield info(os.path.join(dir, name))
+                    try:
+                        file = os.path.join(dir, name)
+                        yield info(file)
+                    except:
+                        print('warning: ignoring file "%s" (unable to stat)' % os.path.normpath(file))
     
     def _collect_remote(self):
         def call(exclude, rel_path):
@@ -678,4 +682,6 @@ def main():
 
 
 if __name__ == '__main__':
+    os.chdir('/home/apollo/sync/confidential/')
+    sys.argv[1:] = ['diff', 'wd3']
     main()

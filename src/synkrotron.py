@@ -682,6 +682,4 @@ def main():
 
 
 if __name__ == '__main__':
-    os.chdir('/home/apollo/sync/confidential/')
-    sys.argv[1:] = ['diff', 'wd3']
     main()

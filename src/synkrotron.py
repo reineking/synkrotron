@@ -449,6 +449,8 @@ class Diff:
         options = []
         if simulate:
             options.append('--dry-run')
+        if self.repo_local.follow_links:
+            options.append('--copy-links')
         if delta:
             dst = delta
         execute(['rsync', '-ahuR', '--files-from=-', '--progress', '--partial-dir', '.rsync-partial'] + options + ['.', dst], cwd=src, input=file_list)

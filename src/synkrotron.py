@@ -679,6 +679,7 @@ def main():
                 diff.show()
             if args.umount:
                 remote.umount()
+            remote.save_cache()
     except Exception as e:
         print('error: ' + str(e))
 

@@ -177,8 +177,8 @@ class Remote:
         cache_index = 0 if command == 'decrypt' else 1
         uncached = [fn for fn in filenames if fn not in self._cache[cache_index]]
         if uncached:
-            input = self.key + '\n' + '\n'.join(uncached)
-            _, output = execute(['encfsctl', command, self.encfs_source], input=input, return_stdout=True)
+            input = '\n'.join(uncached)
+            _, output = execute(['encfsctl', command, '--extpass=echo %s' % self.key, self.encfs_source], input=input, return_stdout=True)
             for fn, mapped in zip(uncached, str(output, 'utf_8').split('\n')):
                 if fn[0] == '/':
                     mapped = '/' + mapped

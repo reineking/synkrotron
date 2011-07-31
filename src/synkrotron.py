@@ -175,16 +175,15 @@ class Remote:
     def _map_names(self, command, filenames):
         self._load_cache()
         cache_index = 0 if command == 'decrypt' else 1
-        uncached = [fn for fn in filenames if fn not in self._cache[cache_index]]
+        filenames = [fn.split(os.sep) for fn in filenames]
+        uncached = [c for fn in filenames for c in fn if c not in self._cache[cache_index]]
         if uncached:
             input = '\n'.join(uncached)
             _, output = execute(['encfsctl', command, '--extpass=echo %s' % self.key, self.encfs_source], input=input, return_stdout=True)
-            for fn, mapped in zip(uncached, str(output, 'utf_8').split('\n')):
-                if fn[0] == '/':
-                    mapped = '/' + mapped
-                self._cache[cache_index][fn] = mapped
-                self._cache[1 - cache_index][mapped] = fn
-        return [self._cache[cache_index][fn] for fn in filenames]
+            for c, mapped in zip(uncached, str(output, 'utf_8').split('\n')):
+                self._cache[cache_index][c] = mapped
+                self._cache[1 - cache_index][mapped] = c
+        return [os.sep.join([self._cache[cache_index][c] for c in fn]) for fn in filenames]
 
 
 class Repo:

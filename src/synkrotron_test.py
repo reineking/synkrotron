@@ -518,8 +518,10 @@ class TestRemote(TestSynkrotron):
         remote.mount()
         clear = ['a/b', 'c', 'x/y/ ä']
         remote.encrypt_names(clear)
-        self.assertEqual(len(clear), len(remote._cache[0]))
-        self.assertEqual(len(clear), len(remote._cache[1]))
+        self.assertEqual(6, len(remote._cache[0]))
+        self.assertEqual(6, len(remote._cache[1]))
+        self.assertTrue('y' in remote._cache[0].values())
+        self.assertTrue('y' in remote._cache[1].keys())
         cache = remote._cache
         remote.save_cache()
         del remote._cache

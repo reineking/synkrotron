@@ -355,7 +355,7 @@ class Diff:
     
     def __init__(self, repo_local, repo_remote, *, ignore_time=False, content=False, modify_window=0):
         """
-        Create a Diff object and generate a list of all differing files.
+        Create a Diff object for generating a list of all differing files.
         
         repo_local: Repo object representing the local directory
         repo_remote: Repo object representing the remote directory
@@ -372,18 +372,84 @@ class Diff:
         self.modify_window = modify_window
         self.repo_local = repo_local
         self.repo_remote = repo_remote
+        self.list = None
+        
+    def compute(self, show=False, show_verbose=False):
+        """
+            Compute and return a list of all differing files.
+            
+            The file list is stored in 'self.list'.
+            If 'show' is set, all differing items are printed to stdout.
+            If 'show_verbose' is set in addition to 'show', additional information about the cause of the detected difference is printed.
+        """
         self.list = []
+        if show and show_verbose:
+            print('Generating a list of all differing files...')
         with futures.ThreadPoolExecutor(max_workers=2) as executor:
-            stats_local, stats_remote = executor.map(Repo.collect, [repo_local, repo_remote])
-        for file_local, stat_local in stats_local.items():
+            stats_local, stats_remote = executor.map(Repo.collect, [self.repo_local, self.repo_remote])
+        if show:
+            print('Comparing %d local files against %d remote files...' % (len(stats_local), len(stats_remote)))
+        for file_local, stat_local in sorted(stats_local.items()):
             if file_local in stats_remote:
                 cmp = self._compare_stats(stat_local, stats_remote[file_local], file_local)
                 if cmp:
-                    self.list.append((file_local, cmp[0], cmp[1]))
+                    self.list.append((file_local,) + cmp)
+                    if show:
+                        Diff._show_item(*self.list[-1], show_verbose=show_verbose)
             else:
-                self.list.append((file_local, stat_local, 'push'))
-        self.list.extend([(f, stats_remote[f], 'pull') for f in set(stats_remote.keys()).difference(stats_local.keys())])
-        self.list.sort()
+                self.list.append((file_local, stat_local, 'push', 'remote file does not exist'))
+                if show:
+                    Diff._show_item(*self.list[-1], show_verbose=show_verbose)
+        pulls = [(f, stats_remote[f], 'pull', 'local file does not exist') for f in sorted(set(stats_remote.keys()).difference(stats_local.keys()))]
+        if show:
+            for item in pulls:
+                Diff._show_item(*item, show_verbose=show_verbose)
+        self.list.extend(pulls)
+        if show:
+            self._print_stats()
+        return self.list
+    
+    def _print_stats(self):
+        pull_count = pull_size = push_count = push_size = 0
+        for _, stat, operation, _ in self.list:
+            if operation == 'push':
+                if stat[0] == 'f':
+                    push_size += stat[1]
+                push_count += 1
+            elif operation == 'pull':
+                if stat[0] == 'f':
+                    pull_size += stat[1]
+                pull_count += 1
+        print('pull: %d files (%s)' % (pull_count, self._format_size(pull_size)))
+        print('push: %d files (%s)' % (push_count, self._format_size(push_size)))
+    
+    @staticmethod
+    def _show_item(file, stat, operation, verbose_info, show_verbose):
+        if not show_verbose:
+            verbose_info = ''
+        else:
+            verbose_info = ' [%s]' % verbose_info
+        if operation == 'push':
+            if stat[0] == 'f':
+                print('--> %s (%s)%s' % (file, Diff._format_size(stat[1]), verbose_info))
+            else:
+                print('--> %s%s' % (file, verbose_info))
+        elif operation == 'pull':
+            if stat[0] == 'f':
+                print('<-- %s (%s)%s' % (file, Diff._format_size(stat[1]), verbose_info))
+            else:
+                print('<-- %s%s' % (file, verbose_info))
+        else:
+            print('<-> %s (%s/%s)%s' % (file, Diff._format_size(stat[0][1]), Diff._format_size(stat[1][1]), verbose_info))
+    
+    @staticmethod
+    def _format_size(byte_size):
+        """Format file size."""
+        units = ['T', 'G', 'M', 'K', '']
+        while len(units) and byte_size >= 1000:
+            byte_size /= 1024
+            units.pop()
+        return '%.1f %sB' % (round(byte_size, 1), units[-1])
     
     def _compare_stats(self, stat_src, stat_dst, file):
         if stat_src[0] == stat_dst[0] == 'd':
@@ -392,9 +458,9 @@ class Diff:
         diff_time = int(stat_src[2] - stat_dst[2])
         if diff_size or (not self.ignore_time and abs(diff_time) > self.modify_window):
             if diff_time < 0:
-                return stat_dst, 'pull'
+                return stat_dst, 'pull', 'remote file is newer'
             else:
-                return stat_src, 'push'
+                return stat_src, 'push', 'local file is newer'
         elif self.content:
             if not isinstance(self.repo_remote.source, str) and not self.repo_remote.source.is_local() and self.repo_remote.source.key:
                 file_encrypted = self.repo_remote.source.encrypt_names([file])[0]
@@ -405,7 +471,7 @@ class Diff:
                 hash_local = executor.submit(self.repo_local.file_hash, file_local)
                 hash_remote = executor.submit(self.repo_remote.file_hash, file)
             if hash_local.result() != hash_remote.result():
-                return (stat_src, stat_dst), 'content'
+                return (stat_src, stat_dst), 'content', 'files have the same timestamp but different content'
         return None
     
     def pull(self, *, simulate=False, delete=False):
@@ -457,6 +523,8 @@ class Diff:
     
     def _copy(self, *, operation, simulate=False, delete=False, delta=None):
         """Copy files from src to dst using rsync."""
+        if self.list is None:
+            self.compute()
         if operation == 'push':
             src = self.repo_local.root
             dst = self.repo_remote.root
@@ -490,38 +558,6 @@ class Diff:
             dst = delta
         execute(['rsync', '-ahuR', '--files-from=-', '--progress', '--partial-dir', '.rsync-partial'] + options + ['.', dst], cwd=src, process_input=file_list)
     
-    @staticmethod
-    def format_size(byte_size):
-        """Format file size."""
-        units = ['T', 'G', 'M', 'K', '']
-        while len(units) and byte_size >= 1000:
-            byte_size /= 1024
-            units.pop()
-        return '%.1f %sB' % (round(byte_size, 1), units[-1])
-    
-    def show(self):
-        """Print all differing files and their sizes."""
-        pull_count = pull_size = push_count = push_size = 0
-        for file, stat, operation in self.list:
-            if operation == 'push':
-                if stat[0] == 'f':
-                    push_size += stat[1]
-                    print('--> %s (%s)' % (file, self.format_size(stat[1])))
-                else:
-                    print('--> %s' % file)
-                push_count += 1
-            elif operation == 'pull':
-                if stat[0] == 'f':
-                    pull_size += stat[1]
-                    print('<-- %s (%s)' % (file, self.format_size(stat[1])))
-                else:
-                    print('<-- %s' % file)
-                pull_count += 1
-            else:
-                print('<-> %s (%s/%s)' % (file, self.format_size(stat[0][1]), self.format_size(stat[1][1])))
-        print('pull: %d objects (%s)' % (pull_count, self.format_size(pull_size)))
-        print('push: %d objects (%s)' % (push_count, self.format_size(push_size)))
-
 
 class Config:
     """Find relevant paths and read the configuration file."""
@@ -577,6 +613,7 @@ class Config:
     
     @staticmethod
     def write_delta_config(*, name, location, ignore_time, follow_links, modify_window, content, config_file):
+        """ Write config file to delta location."""
         config = configparser.ConfigParser()
         config.add_section(name)
         config.set(name, 'location', location)
@@ -680,6 +717,7 @@ def parse_args():
     parser.add_argument('-i', '--ignore-time', dest='ignore_time', action='store_true', help='ignore time stamps for determining whether files are different')
     parser.add_argument('--delta', dest='delta', help='push only changes to the specified directory')
     parser.add_argument('-c', '--content', action='store_true', help='compare file contents in addition to size and modification time')
+    parser.add_argument('-v', '--verbose', action='store_true', help='print additional diff information')
     if len(sys.argv) == 1:
         parser.print_usage()
         exit()
@@ -717,6 +755,7 @@ def main():
             if content and remote.key:
                 remote.reverse_mount()
             diff = Diff(repo_local, repo_remote, ignore_time=ignore_time, content=content, modify_window=remote_config['modify_window'])
+            diff.compute(args.command == 'diff', args.command == 'verbose')
             if content and remote.key:
                 remote.reverse_umount()
             delete = args.delete or remote_config['delete']
@@ -724,8 +763,6 @@ def main():
                 diff.pull(simulate=args.simulate, delete=delete)
             elif args.command == 'push':
                 diff.push(simulate=args.simulate, delete=delete, delta=args.delta)
-            elif args.command == 'diff':
-                diff.show()
             if args.umount:
                 remote.umount()
             remote.save_cache()

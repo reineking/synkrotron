@@ -71,6 +71,8 @@ class TestSynkrotron(unittest.TestCase):
 class TestDiff(TestSynkrotron):
     
     def _filter(self, diff):
+        if diff.list is None:
+            diff.compute()
         return tuple((d[0], d[2]) for d in diff.list)
     
     def test_diff(self):
@@ -80,7 +82,7 @@ class TestDiff(TestSynkrotron):
         self.assertEqual((('dir', 'push'), ('dir/file_ä', 'push'), ('file_ä', 'push')), self._filter(Diff(r1, r2)))
         self._populate(self.local2_base)
         r2 = Repo(self.local2_base)
-        self.assertEqual((), tuple(Diff(r1, r2).list))
+        self.assertEqual((), tuple(Diff(r1, r2).compute()))
         os.remove(os.path.join(self.local1_base, 'file_ä'))
         os.remove(os.path.join(self.local1_base, 'dir', 'file_ä'))
         r1 = Repo(self.local1_base)
@@ -207,7 +209,7 @@ class TestDiff(TestSynkrotron):
     def test_push_content(self):
         self._populate(self.local1_base)
         self._populate(self.local2_base)
-        self.assertEqual(0, len(Diff(Repo(self.local1_base), Repo(self.local2_base), content=True).list))
+        self.assertEqual(0, len(Diff(Repo(self.local1_base), Repo(self.local2_base), content=True).compute()))
         f_src = os.path.join(self.local1_base, 'dir', 'file_ä')
         f_dst = os.path.join(self.local2_base, 'dir', 'file_ä')
         with io.open(f_src, 'w') as f:
@@ -217,7 +219,7 @@ class TestDiff(TestSynkrotron):
         self.assertEqual((('dir/file_ä', 'content'),), self._filter(diff))
         diff.push()
         diff = Diff(Repo(self.local1_base), Repo(self.local2_base), content=True)
-        self.assertEqual(0, len(diff.list))
+        self.assertEqual(0, len(diff.compute()))
     
     def test_push_simulate(self):
         self._populate(self.local1_base)
@@ -248,7 +250,7 @@ class TestDiff(TestSynkrotron):
         remote.umount()
         self.assertListEqual(['.synkrotron', 'file_ä'], os.listdir(self.delta))
     
-    def test_show(self):
+    def test_compute_show(self):
         self._populate(self.local1_base)
         os.mkdir(os.path.join(self.remote, 'test'))
         with io.open(os.path.join(self.remote, 'file_ä'), 'w') as f:
@@ -256,10 +258,30 @@ class TestDiff(TestSynkrotron):
         stdout = sys.stdout
         output = io.StringIO()
         sys.stdout = output
-        Diff(Repo(self.local1_base), Repo(self.remote), content=True).show()
+        diff = Diff(Repo(self.local1_base), Repo(self.remote), content=True)
+        diff.compute(show=True)
+        expected = '\n'.join(('Comparing 4 local files against 3 remote files...',
+                              '--> dir',
+                              '--> dir/file_ä (8.0 B)',
+                              '<-> file_ä (7.0 B/7.0 B)',
+                              '<-- test',
+                              'pull: 1 files (0.0 B)',
+                              'push: 2 files (8.0 B)\n'))
+        self.assertEqual(expected, output.getvalue())
+        output = io.StringIO()
+        sys.stdout = output
+        diff.compute(show=True, show_verbose=True)
+        expected = '\n'.join(('Generating a list of all differing files...',
+                              'Comparing 4 local files against 3 remote files...',
+                              '--> dir [remote file does not exist]',
+                              '--> dir/file_ä (8.0 B) [remote file does not exist]',
+                              '<-> file_ä (7.0 B/7.0 B) [files have the same timestamp but different content]',
+                              '<-- test [local file does not exist]',
+                              'pull: 1 files (0.0 B)',
+                              'push: 2 files (8.0 B)\n'))
+        self.assertEqual(expected, output.getvalue())
         sys.stdout = stdout
-        self.assertEqual('--> dir\n--> dir/file_ä (8.0 B)\n<-> file_ä (7.0 B/7.0 B)\n<-- test\npull: 1 objects (0.0 B)\npush: 2 objects (8.0 B)\n', output.getvalue())
-
+    
 
 class TestRepo(TestSynkrotron):
     
@@ -612,7 +634,7 @@ class TestMain(TestSynkrotron):
         sys.argv[1:] = ['push', 'remote', '-u']
         synkrotron.main()
         # check remote files (should be the same now (encrypted of course) as the ones in self.local3_base)
-        self.assertEqual(0, len(Diff(Repo(self.local3_base), Repo(r)).list))
+        self.assertEqual(0, len(Diff(Repo(self.local3_base), Repo(r)).compute()))
         r.umount()
     
 

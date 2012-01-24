@@ -32,13 +32,13 @@ import unittest
 
 class TestSynkrotron(unittest.TestCase):
     
-    def _populate(self, dir):
-        if not os.path.exists(dir):
-            os.mkdir(dir)
-        with io.open(os.path.join(dir, 'file_ä'), 'w') as f:
+    def _populate(self, dirpath):
+        if not os.path.exists(dirpath):
+            os.mkdir(dirpath)
+        with io.open(os.path.join(dirpath, 'file_ä'), 'w') as f:
             f.write('content')
-        os.mkdir(os.path.join(dir, 'dir'))
-        with io.open(os.path.join(dir, 'dir', 'file_ä'), 'w') as f:
+        os.mkdir(os.path.join(dirpath, 'dir'))
+        with io.open(os.path.join(dirpath, 'dir', 'file_ä'), 'w') as f:
             f.write('content2')
         
     def setUp(self):
@@ -61,87 +61,11 @@ class TestSynkrotron(unittest.TestCase):
         self.key = 'WeakPassword'
         self.mount_point = os.path.join(self.dir, 'mount_point')
         self.local3_base, self.local3_ms, self.local3_config = create_local('local3', location=self.remote_host, key=self.key, mount_point=self.mount_point)
+        self.delta = os.path.join(self.dir, 'delta')
+        os.mkdir(self.delta)
     
     def tearDown(self):
         shutil.rmtree(self.dir)
-    
-    def test_parse_args(self):
-        sys.argv[1:] = ['pull', 'remote']
-        args = synkrotron.parse_args()
-        self.assertEqual('pull', args.command)
-        self.assertEqual('remote', args.remote)
-        self.assertFalse(args.simulate)
-        sys.argv[1:] = ['pull', 'remote', '--simulate']
-        args = synkrotron.parse_args()
-        self.assertTrue(args.simulate)
-        sys.argv[1:] = ['pull', 'remote', '-s']
-        args = synkrotron.parse_args()
-        self.assertTrue(args.simulate)
-
-    def test_main_mount(self):
-        os.chdir(self.local3_base)
-        sys.argv[1:] = ['mount', 'remote']
-        synkrotron.main()
-        self.assertTrue(os.path.islink(self.mount_point))
-        self._populate(self.mount_point)
-        Remote('remote', self.remote_host, self.local3_ms, key=self.key, mount_point=self.mount_point).umount()
-        self.assertEqual(3, len(os.listdir(self.remote)))
-    
-    def test_main_umount(self):
-        remote = Remote('remote', self.remote_host, self.local3_ms, key=self.key, mount_point=self.mount_point)
-        remote.mount()
-        os.chdir(self.local3_base)
-        sys.argv[1:] = ['umount', 'remote']
-        synkrotron.main()
-        self.assertFalse(os.path.exists(self.mount_point))
-        self.assertFalse(os.path.exists(remote._sync_path('sshfs')))
-        self.assertFalse(os.path.exists(remote._sync_path('encfs')))
-    
-    def test_main_mount_pull_umount(self):
-        self._populate(self.remote)
-        os.chdir(self.local2_base)
-        sys.argv[1:] = ['pull', 'remote', '-u']
-        synkrotron.main()
-        remote = Remote('remote', self.remote, self.local2_ms)
-        self.assertFalse(os.path.exists(remote._sync_path('sshfs')))
-        self.assertEqual(3, len(os.listdir(self.local2_base)))
-    
-    def test_main_mount_push(self):
-        self._populate(self.local3_base)
-        os.chdir(self.local3_base)
-        sys.argv[1:] = ['push', 'remote']
-        synkrotron.main()
-        Remote('remote', self.remote_host, self.local3_ms, key=self.key, mount_point=self.mount_point).umount()
-        self.assertEqual(3, len(os.listdir(self.remote)))
-    
-    def test_main_push_path(self):
-        self._populate(self.local1_base)
-        os.chdir(self.local1_base)
-        sys.argv[1:] = ['push', 'remote', '-u', '-p', 'dir']
-        synkrotron.main()
-        self.assertEqual(('dir',), tuple(os.listdir(self.remote)))
-        self.assertEqual(('file_ä',), tuple(os.listdir(os.path.join(self.remote, 'dir'))))
-    
-    def test_main_push_sshfs_encfs_content(self):
-        self._populate(self.local3_base)
-        os.chdir(self.local3_base)
-        sys.argv[1:] = ['push', 'remote']
-        synkrotron.main()
-        file_local = os.path.join(self.local3_base, 'file_ä')
-        file_remote = os.path.join(self.mount_point, 'file_ä')
-        with io.open(file_local, 'w') as f:
-            f.write('xontent')
-        os.utime(file_local, (os.path.getatime(file_remote), os.path.getmtime(file_remote)))
-        sys.argv[1:] = ['push', 'remote']
-        synkrotron.main()
-        with io.open(file_remote, 'r') as f:
-            self.assertEqual('content', f.read())
-        sys.argv[1:] = ['push', 'remote', '--content']
-        synkrotron.main()
-        with io.open(file_remote, 'r') as f:
-            self.assertEqual('xontent', f.read())
-        sys.argv[1:] = ['umount', 'remote']
-        synkrotron.main()
     
 
 class TestDiff(TestSynkrotron):
@@ -316,10 +240,13 @@ class TestDiff(TestSynkrotron):
     
     def test_push_delta(self):
         self._populate(self.local1_base)
-        self._populate(self.local2_base)
-        os.remove(os.path.join(self.local2_base, 'file_ä'))
-        Diff(Repo(self.local1_base), Repo(self.local2_base)).push(delta=self.remote)
-        self.assertListEqual(['file_ä'], os.listdir(self.remote))
+        self._populate(self.remote)
+        os.remove(os.path.join(self.remote, 'file_ä'))
+        remote = Remote('remote', self.remote, self.local1_ms)
+        remote.mount()
+        Diff(Repo(self.local1_base), Repo(remote)).push(delta=self.delta)
+        remote.umount()
+        self.assertListEqual(['.synkrotron', 'file_ä'], os.listdir(self.delta))
     
     def test_show(self):
         self._populate(self.local1_base)
@@ -582,6 +509,112 @@ class TestConfig(TestSynkrotron):
         self.assertEqual(0, config.remotes['remote']['follow_links'])
         self.assertEqual(0, config.remotes['remote']['content'])
 
+
+class TestMain(TestSynkrotron):
+    
+    def test_parse_args(self):
+        sys.argv[1:] = ['pull', 'remote']
+        args = synkrotron.parse_args()
+        self.assertEqual('pull', args.command)
+        self.assertEqual('remote', args.remote)
+        self.assertFalse(args.simulate)
+        sys.argv[1:] = ['pull', 'remote', '--simulate']
+        args = synkrotron.parse_args()
+        self.assertTrue(args.simulate)
+        sys.argv[1:] = ['pull', 'remote', '-s']
+        args = synkrotron.parse_args()
+        self.assertTrue(args.simulate)
+
+    def test_main_mount(self):
+        os.chdir(self.local3_base)
+        sys.argv[1:] = ['mount', 'remote']
+        synkrotron.main()
+        self.assertTrue(os.path.islink(self.mount_point))
+        self._populate(self.mount_point)
+        Remote('remote', self.remote_host, self.local3_ms, key=self.key, mount_point=self.mount_point).umount()
+        self.assertEqual(3, len(os.listdir(self.remote)))
+    
+    def test_main_umount(self):
+        remote = Remote('remote', self.remote_host, self.local3_ms, key=self.key, mount_point=self.mount_point)
+        remote.mount()
+        os.chdir(self.local3_base)
+        sys.argv[1:] = ['umount', 'remote']
+        synkrotron.main()
+        self.assertFalse(os.path.exists(self.mount_point))
+        self.assertFalse(os.path.exists(remote._sync_path('sshfs')))
+        self.assertFalse(os.path.exists(remote._sync_path('encfs')))
+    
+    def test_main_mount_pull_umount(self):
+        self._populate(self.remote)
+        os.chdir(self.local2_base)
+        sys.argv[1:] = ['pull', 'remote', '-u']
+        synkrotron.main()
+        remote = Remote('remote', self.remote, self.local2_ms)
+        self.assertFalse(os.path.exists(remote._sync_path('sshfs')))
+        self.assertEqual(3, len(os.listdir(self.local2_base)))
+    
+    def test_main_mount_push(self):
+        self._populate(self.local3_base)
+        os.chdir(self.local3_base)
+        sys.argv[1:] = ['push', 'remote']
+        synkrotron.main()
+        Remote('remote', self.remote_host, self.local3_ms, key=self.key, mount_point=self.mount_point).umount()
+        self.assertEqual(3, len(os.listdir(self.remote)))
+    
+    def test_main_push_path(self):
+        self._populate(self.local1_base)
+        os.chdir(self.local1_base)
+        sys.argv[1:] = ['push', 'remote', '-u', '-p', 'dir']
+        synkrotron.main()
+        self.assertEqual(('dir',), tuple(os.listdir(self.remote)))
+        self.assertEqual(('file_ä',), tuple(os.listdir(os.path.join(self.remote, 'dir'))))
+    
+    def test_main_push_sshfs_encfs_content(self):
+        self._populate(self.local3_base)
+        os.chdir(self.local3_base)
+        sys.argv[1:] = ['push', 'remote']
+        synkrotron.main()
+        file_local = os.path.join(self.local3_base, 'file_ä')
+        file_remote = os.path.join(self.mount_point, 'file_ä')
+        with io.open(file_local, 'w') as f:
+            f.write('xontent')
+        os.utime(file_local, (os.path.getatime(file_remote), os.path.getmtime(file_remote)))
+        sys.argv[1:] = ['push', 'remote']
+        synkrotron.main()
+        with io.open(file_remote, 'r') as f:
+            self.assertEqual('content', f.read())
+        sys.argv[1:] = ['push', 'remote', '--content']
+        synkrotron.main()
+        with io.open(file_remote, 'r') as f:
+            self.assertEqual('xontent', f.read())
+        sys.argv[1:] = ['umount', 'remote']
+        synkrotron.main()
+    
+    def test_main_push_delta_key(self):
+        self._populate(self.local3_base)
+        os.chdir(self.local3_base)
+        # push files to remote
+        sys.argv[1:] = ['push', 'remote', '-u']
+        synkrotron.main()
+        os.makedirs(os.path.join(self.local3_base, 'dir', 'new'))
+        # push changes to delta
+        sys.argv[1:] = ['push', 'remote', '-u', '--delta=%s' % self.delta]
+        synkrotron.main()
+        # check delta files
+        r = Remote('remote', self.remote_host, self.local3_ms, key=self.key, mount_point=self.mount_point)
+        r.mount()
+        files = [f for f in os.listdir(self.delta) if f != '.encfs6.xml' and f != '.synkrotron']
+        self.assertListEqual(['dir'], r.decrypt_names(files))
+        path = os.path.join(self.delta, files[0])
+        self.assertListEqual(['new'], r.decrypt_names(os.listdir(path)))
+        # push delta to remote
+        os.chdir(self.delta)
+        sys.argv[1:] = ['push', 'remote', '-u']
+        synkrotron.main()
+        # check remote files (should be the same now (encrypted of course) as the ones in self.local3_base)
+        self.assertEqual(0, len(Diff(Repo(self.local3_base), Repo(r)).list))
+        r.umount()
+    
 
 if __name__ == "__main__":
     unittest.main()

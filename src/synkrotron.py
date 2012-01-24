@@ -31,6 +31,7 @@ import inspect
 import io
 import os
 import pickle
+import shutil
 import signal
 import stat
 import subprocess
@@ -57,12 +58,16 @@ class Remote:
         else:
             self.host = None
             self.root = location
+            if not os.path.isdir(location):
+                raise Exception('%s is not a valid directory' % location)
         self.sync_dir = sync_dir
         self.key = key
         self.mount_point = mount_point
+        self.mount_path = None
+        self.reverse_mount_path = None
     
-    def _sync_path(self, type):
-        return os.path.join(self.sync_dir, self.name + '-' + type)
+    def _sync_path(self, dir_name):
+        return os.path.join(self.sync_dir, self.name + '-' + dir_name)
     
     def is_local(self):
         """Check whether the directory is located on a remote server."""
@@ -70,6 +75,8 @@ class Remote:
     
     def mount(self):
         """Mount the directory and return the mount point."""
+        if self.mount_path != None:
+            raise Exception('already mounted at %s' % self.mount_path)
         path = self.location
         if not self.is_local(): # remote server -- mount with sshfs
             target = self._sync_path('sshfs')
@@ -87,11 +94,11 @@ class Remote:
                 if not os.path.exists(target):
                     os.mkdir(target)
                 if os.path.isfile(os.path.join(self.encfs_source, '.encfs6.xml')):
-                    input = self.key
+                    process_input = self.key
                 else:
                     # manual encfs configuration; pretty ugly, but currently it's the only way for using custom options
-                    input = 'x\n1\n192\n\n1\nno\nno\n\n0\n\n' + self.key
-                if execute(['encfs', '--stdinpass', path, target], input=input) != 0:
+                    process_input = 'x\n1\n192\n\n1\nno\nno\n\n0\n\n' + self.key
+                if execute(['encfs', '--stdinpass', path, target], process_input=process_input) != 0:
                     raise Exception('unable to mount %s with encfs' % path)
             path = target
         if self.mount_point:
@@ -130,6 +137,8 @@ class Remote:
         The remote directory must be encrypted and mounted.
         This is used for efficiently comparing encrypted file contents in case the remote directory is mounted over a network connection.
         """
+        if self.reverse_mount_path != None:
+            raise Exception('already reverse-mounted at %s' % self.reverse_mount_path)
         self.encfs_reverse = self._sync_path('encfs-reverse')
         if not os.path.ismount(self.encfs_reverse):
             if not os.path.exists(self.encfs_reverse):
@@ -137,7 +146,7 @@ class Remote:
             if not hasattr(self, 'encfs_source'):
                 raise Exception('remote must be mounted with encfs')
             env = {'ENCFS6_CONFIG':os.path.join(self.encfs_source, '.encfs6.xml')}
-            if execute(['encfs', '--stdinpass', '--reverse', os.path.dirname(self.sync_dir), self.encfs_reverse], input=self.key, env=env) != 0:
+            if execute(['encfs', '--stdinpass', '--reverse', os.path.dirname(self.sync_dir), self.encfs_reverse], process_input=self.key, env=env) != 0:
                 raise Exception('unable to reverse mount %s with encfs' % self.encfs_reverse)
         return self.encfs_reverse
     
@@ -178,8 +187,8 @@ class Remote:
         filenames = [fn.split(os.sep) for fn in filenames]
         uncached = [c for fn in filenames for c in fn if c not in self._cache[cache_index]]
         if uncached:
-            input = '\n'.join(uncached)
-            _, output = execute(['encfsctl', command, '--extpass=echo %s' % self.key, self.encfs_source], input=input, return_stdout=True)
+            process_input = '\n'.join(uncached)
+            _, output = execute(['encfsctl', command, '--extpass=echo %s' % self.key, self.encfs_source], process_input=process_input, return_stdout=True)
             for c, mapped in zip(uncached, str(output, 'utf_8').split('\n')):
                 self._cache[cache_index][c] = mapped
                 self._cache[1 - cache_index][mapped] = c
@@ -225,7 +234,7 @@ class Repo:
         """
         code = '\n'.join([l for l in inspect.getsource(sys.modules[__name__]).split('\n') if l.startswith('import ')])
         code += '\n' + inspect.getsource(Repo) + '\npickle.dump(%s, sys.stdout.buffer)' % line
-        _, output = execute(['ssh', self.source.host, 'LC_CTYPE=en_US.utf-8 python3'], input=code, return_stdout=True)
+        _, output = execute(['ssh', self.source.host, 'LC_CTYPE=en_US.utf-8 python3'], process_input=code, return_stdout=True)
         return pickle.loads(output)
     
     def collect(self):
@@ -242,28 +251,28 @@ class Repo:
                 st = os.stat(file)
             else:
                 st = os.lstat(file)
-            type = 'x'
+            file_type = 'x'
             if stat.S_ISDIR(st.st_mode):
-                type = 'd'
+                file_type = 'd'
             elif stat.S_ISREG(st.st_mode):
-                type = 'f'
+                file_type = 'f'
             if stat.S_ISLNK(st.st_mode): # not self.follow_links and 
-                type = 'l'
-            return path, (type, st.st_size, st.st_mtime)
+                file_type = 'l'
+            return path, (file_type, st.st_size, st.st_mtime)
         base = os.path.join(self.root, self.rel_path)
         if not os.path.exists(base):
             return
         yield info(base)
-        for dir, dirnames, filenames in os.walk(base, followlinks=self.follow_links):
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=self.follow_links):
             for names in (dirnames, filenames):
                 names.sort()
-                rel_dir = os.path.relpath(dir, self.root)
+                rel_dir = os.path.relpath(dirpath, self.root)
                 if self.exclude:
                     for ign in reversed(list(self._ignore_files(rel_dir, names))):
                         del names[bisect.bisect_left(names, ign)]
                 for name in names:
                     try:
-                        file = os.path.join(dir, name)
+                        file = os.path.join(dirpath, name)
                         yield info(file)
                     except:
                         print('warning: ignoring file "%s" (unable to stat)' % os.path.normpath(file))
@@ -298,9 +307,9 @@ class Repo:
         else:
             return call(self.exclude, self.rel_path)
     
-    def _ignore_files(self, dir, filenames):
+    def _ignore_files(self, dirpath, filenames):
         for fn in filenames:
-            path = os.path.normpath(os.path.join(dir, fn))
+            path = os.path.normpath(os.path.join(dirpath, fn))
             for pattern in self.exclude:
                 if pattern[0] == '/': # anchored: match the whole path starting from the repository root
                     if fnmatch.fnmatch(path, pattern[1:]):
@@ -399,15 +408,14 @@ class Diff:
                 return (stat_src, stat_dst), 'content'
         return None
     
-    def pull(self, *, simulate=False, delete=False, delta=None):
+    def pull(self, *, simulate=False, delete=False):
         """
         Pull differing files from the remote directory to the local directory using rsync.
         
         simulate: run rsync in simulation mode
         delete: delete files that exist locally but not on the remote side
-        delta: copy all differing files to this path instead of copying them to the local directory
         """
-        self._copy(operation='pull', simulate=simulate, delete=delete, delta=delta)
+        self._copy(operation='pull', simulate=simulate, delete=delete)
     
     def push(self, *, simulate=False, delete=False, delta=None):
         """
@@ -417,7 +425,35 @@ class Diff:
         delete: delete files that exist on the remote side but not locally
         delta: copy all differing files to this path instead of copying them to the remote directory
         """
-        self._copy(operation='push', simulate=simulate, delete=delete, delta=delta)
+        if delta:
+            if ':' in delta:
+                raise Exception('delta directory must be local')
+            remote = self.repo_remote.source
+            if not isinstance(remote, Remote):
+                raise TypeError('"remote" must be of type "Remote"')
+            if remote.key:
+                # copy '.encfs6.xml' to the delta directory so the salt is the same as for the remote location
+                # Note: this does not work if delta has to be mounted with sshfs first, hence the check above
+                shutil.copy(os.path.join(remote.encfs_source, '.encfs6.xml'), os.path.join(delta, '.encfs6.xml'))
+            delta_remote = Remote(remote.name + '-delta', delta, remote.sync_dir, key=remote.key)
+            delta_remote.mount() # mount with encfs if key is set
+            delta_path = delta_remote.mount_path
+        else:
+            delta_path = None
+        self._copy(operation='push', simulate=simulate, delete=delete, delta=delta_path)
+        if delta:
+            delta_remote.umount()
+            # create '.synkrotron' files in delta directory
+            sync_dir = os.path.join(delta, '.synkrotron')
+            os.mkdir(sync_dir)
+            config_file = os.path.join(sync_dir, 'config')
+            Config.write_delta_config(name=remote.name,
+                                      location=remote.location, 
+                                      ignore_time=self.ignore_time, 
+                                      follow_links=self.repo_remote.follow_links, 
+                                      modify_window=self.modify_window, 
+                                      content=self.content, 
+                                      config_file=config_file)
     
     def _copy(self, *, operation, simulate=False, delete=False, delta=None):
         """Copy files from src to dst using rsync."""
@@ -452,16 +488,16 @@ class Diff:
             options.append('--copy-links')
         if delta:
             dst = delta
-        execute(['rsync', '-ahuR', '--files-from=-', '--progress', '--partial-dir', '.rsync-partial'] + options + ['.', dst], cwd=src, input=file_list)
+        execute(['rsync', '-ahuR', '--files-from=-', '--progress', '--partial-dir', '.rsync-partial'] + options + ['.', dst], cwd=src, process_input=file_list)
     
     @staticmethod
-    def format_size(bytes):
+    def format_size(byte_size):
         """Format file size."""
         units = ['T', 'G', 'M', 'K', '']
-        while len(units) and bytes >= 1000:
-            bytes /= 1024
+        while len(units) and byte_size >= 1000:
+            byte_size /= 1024
             units.pop()
-        return '%.1f %sB' % (round(bytes, 1), units[-1])
+        return '%.1f %sB' % (round(byte_size, 1), units[-1])
     
     def show(self):
         """Print all differing files and their sizes."""
@@ -490,15 +526,15 @@ class Diff:
 class Config:
     """Find relevant paths and read the configuration file."""
     
-    _defaults = {'location':'',
-                 'key':'',
-                 'mount_point':'',
-                 'ignore_time':'0',
-                 'delete':'0',
-                 'follow_links':'0',
-                 'exclude':'',
-                 'modify_window':'0',
-                 'content':'0'}
+    _defaults = {'location': '',
+                 'key': '',
+                 'mount_point': '',
+                 'ignore_time': '0',
+                 'delete': '0',
+                 'follow_links': '0',
+                 'exclude': '',
+                 'modify_window': '0',
+                 'content': '0'}
      
     def __init__(self, cwd=None):
         """
@@ -540,12 +576,24 @@ class Config:
                 self.remotes[remote][opt] = int(self.remotes[remote][opt]) # convert to int
     
     @staticmethod
+    def write_delta_config(*, name, location, ignore_time, follow_links, modify_window, content, config_file):
+        config = configparser.ConfigParser()
+        config.add_section(name)
+        config.set(name, 'location', location)
+        config.set(name, 'ignore_time', str(ignore_time))
+        config.set(name, 'follow_links', str(follow_links))
+        config.set(name, 'modify_window', str(modify_window))
+        config.set(name, 'content', str(content))
+        with io.open(config_file, 'w') as f:
+            config.write(f)
+    
+    @staticmethod
     def init_remote(remote):
         """Create or update a remote directory configuration."""
-        dir = os.path.join(os.getcwd(), '.synkrotron')
+        sync_dir = os.path.join(os.getcwd(), '.synkrotron')
         if not os.path.exists(dir):
-            os.mkdir(dir)
-        config_file = os.path.join(dir, 'config')
+            os.mkdir(sync_dir)
+        config_file = os.path.join(sync_dir, 'config')
         if not os.path.exists(config_file):
             print('Creating new configuration')
             with io.open(config_file, 'w'):
@@ -597,11 +645,11 @@ class Config:
             config.write(f)
 
 
-def execute(args, *, input=None, cwd=None, return_stdout=False, env=None):
+def execute(args, *, process_input=None, cwd=None, return_stdout=False, env=None):
     """
     Run an external program and return its exit code and, optionally, its output.
     
-    input: a string passed to stdin of the program (optional)
+    process_input: a string passed to stdin of the program (optional)
     cwd: working directory of the program (optional)
     return_stdout: determines whether the program output should be returned (default is False)
     env: set environment variables for the program (optional)
@@ -609,12 +657,12 @@ def execute(args, *, input=None, cwd=None, return_stdout=False, env=None):
     if env:
         env.update(os.environ)
     process = subprocess.Popen(args, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE if return_stdout else None, env=env)
-    if input and isinstance(input, str): # convert string input to bytes
-        if input[-1] == '\n':
-            input = input.encode()
+    if process_input and isinstance(process_input, str): # convert string input to bytes
+        if process_input[-1] == '\n':
+            process_input = process_input.encode()
         else:
-            input = (input + '\n').encode()
-    stdout, _ = process.communicate(input=input)
+            process_input = (process_input + '\n').encode()
+    stdout, _ = process.communicate(input=process_input)
     if return_stdout:
         return process.returncode, stdout
     else:
@@ -630,7 +678,7 @@ def parse_args():
     parser.add_argument('-s', '--simulate', action='store_true', help='set dry-run option for rsync (during pull or push)')
     parser.add_argument('-d', '--delete', action='store_true', help='set delete option for rsync (during pull or push)')
     parser.add_argument('-i', '--ignore-time', dest='ignore_time', action='store_true', help='ignore time stamps for determining whether files are different')
-    parser.add_argument('--delta', dest='delta', help='pull/push only changes to the specified path')
+    parser.add_argument('--delta', dest='delta', help='push only changes to the specified directory')
     parser.add_argument('-c', '--content', action='store_true', help='compare file contents in addition to size and modification time')
     if len(sys.argv) == 1:
         parser.print_usage()
@@ -672,8 +720,10 @@ def main():
             if content and remote.key:
                 remote.reverse_umount()
             delete = args.delete or remote_config['delete']
-            if args.command in {'pull', 'push'}:
-                diff._copy(operation=args.command, simulate=args.simulate, delete=delete, delta=args.delta)
+            if args.command == 'pull':
+                diff.pull(simulate=args.simulate, delete=delete)
+            elif args.command == 'push':
+                diff.push(simulate=args.simulate, delete=delete, delta=args.delta)
             elif args.command == 'diff':
                 diff.show()
             if args.umount:

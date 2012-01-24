@@ -755,7 +755,7 @@ def main():
             if content and remote.key:
                 remote.reverse_mount()
             diff = Diff(repo_local, repo_remote, ignore_time=ignore_time, content=content, modify_window=remote_config['modify_window'])
-            diff.compute(args.command == 'diff', args.command == 'verbose')
+            diff.compute(args.command == 'diff', args.verbose)
             if content and remote.key:
                 remote.reverse_umount()
             delete = args.delete or remote_config['delete']

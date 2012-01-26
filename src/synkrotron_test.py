@@ -25,6 +25,7 @@ import synkrotron
 from synkrotron import Config, Diff, Remote, Repo
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -40,9 +41,22 @@ class TestSynkrotron(unittest.TestCase):
         os.mkdir(os.path.join(dirpath, 'dir'))
         with io.open(os.path.join(dirpath, 'dir', 'file_ä'), 'w') as f:
             f.write('content2')
-        
+    
+    def _fix_mtime(self, path, mtime=0):
+        os.utime(path, (mtime, mtime))
+        for root, dirs, files in os.walk(path):
+            try:
+                del dirs[dirs.index('.synkrotron')]
+            except ValueError:
+                pass
+            for name in dirs + files:
+                os.utime(os.path.join(root, name), (mtime, mtime))
+    
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix='synkrotron-test-')
+        self.test_dir = os.path.join(tempfile.gettempdir(), 'synkrotron-test')
+        if not os.path.exists(self.test_dir):
+            os.mkdir(self.test_dir)
+        self.dir = tempfile.mkdtemp(dir=self.test_dir)
         def create_local(name, **kwargs):
             base_dir = os.path.join(self.dir, name)
             sync_dir = os.path.join(base_dir, '.synkrotron')
@@ -65,6 +79,11 @@ class TestSynkrotron(unittest.TestCase):
         os.mkdir(self.delta)
     
     def tearDown(self):
+        # unmount anything that is still mounted in self.dir
+        for path, _, _ in os.walk(self.test_dir): 
+            if os.path.ismount(path):
+                subprocess.call(['fusermount', '-u', path])
+        # delete it all
         shutil.rmtree(self.dir)
     
 
@@ -81,11 +100,11 @@ class TestDiff(TestSynkrotron):
         r2 = Repo(self.local2_base)
         self.assertEqual((('dir', 'push'), ('dir/file_ä', 'push'), ('file_ä', 'push')), self._filter(Diff(r1, r2)))
         self._populate(self.local2_base)
-        r2 = Repo(self.local2_base)
+        self._fix_mtime(self.local1_base)
+        self._fix_mtime(self.local2_base)
         self.assertEqual((), tuple(Diff(r1, r2).compute()))
         os.remove(os.path.join(self.local1_base, 'file_ä'))
         os.remove(os.path.join(self.local1_base, 'dir', 'file_ä'))
-        r1 = Repo(self.local1_base)
         self.assertEqual((('dir/file_ä', 'pull'), ('file_ä', 'pull')), self._filter(Diff(r1, r2)))
         r1 = Repo(self.local1_base, rel_path='dir')
         r2 = Repo(self.local2_base, rel_path='dir')
@@ -106,13 +125,13 @@ class TestDiff(TestSynkrotron):
     def test_diff_content(self):
         self._populate(self.local1_base)
         self._populate(self.local2_base)
+        self._fix_mtime(self.local1_base)
+        self._fix_mtime(self.local2_base)
         diff = Diff(Repo(self.local1_base), Repo(self.local2_base), content=True)
         self.assertEqual((), self._filter(diff))
-        f_src = os.path.join(self.local1_base, 'dir', 'file_ä')
-        f_dst = os.path.join(self.local2_base, 'dir', 'file_ä')
-        with io.open(f_src, 'w') as f:
+        with io.open(os.path.join(self.local1_base, 'dir', 'file_ä'), 'w') as f:
             f.write('xontent2')
-        os.utime(f_src, (os.path.getatime(f_dst), os.path.getmtime(f_dst)))
+        self._fix_mtime(self.local1_base)
         diff = Diff(Repo(self.local1_base), Repo(self.local2_base), content=True)
         self.assertEqual((('dir/file_ä', 'content'),), self._filter(diff))
     
@@ -121,6 +140,8 @@ class TestDiff(TestSynkrotron):
         remote.mount()
         self._populate(self.local1_base)
         self._populate(self.remote)
+        self._fix_mtime(self.local1_base)
+        self._fix_mtime(self.remote)
         diff = Diff(Repo(self.local1_base), Repo(remote), content=True)
         self.assertEqual((), self._filter(diff))
         f_src = os.path.join(self.local1_base, 'dir', 'file_ä')
@@ -138,6 +159,8 @@ class TestDiff(TestSynkrotron):
         remote.reverse_mount()
         self._populate(self.local1_base)
         self._populate(remote.encfs_destination)
+        self._fix_mtime(self.local1_base)
+        self._fix_mtime(remote.encfs_destination)
         diff = Diff(Repo(self.local1_base), Repo(remote), content=True)
         self.assertEqual((), self._filter(diff))
         f_local = os.path.join(self.local1_base, 'dir', 'file_ä')
@@ -210,11 +233,10 @@ class TestDiff(TestSynkrotron):
         self._populate(self.local1_base)
         self._populate(self.local2_base)
         self.assertEqual(0, len(Diff(Repo(self.local1_base), Repo(self.local2_base), content=True).compute()))
-        f_src = os.path.join(self.local1_base, 'dir', 'file_ä')
-        f_dst = os.path.join(self.local2_base, 'dir', 'file_ä')
-        with io.open(f_src, 'w') as f:
+        with io.open(os.path.join(self.local1_base, 'dir', 'file_ä'), 'w') as f:
             f.write('xontent2')
-        os.utime(f_src, (os.path.getatime(f_dst), os.path.getmtime(f_dst)))
+        self._fix_mtime(self.local1_base)
+        self._fix_mtime(self.local2_base)
         diff = Diff(Repo(self.local1_base), Repo(self.local2_base), content=True)
         self.assertEqual((('dir/file_ä', 'content'),), self._filter(diff))
         diff.push()
@@ -275,7 +297,9 @@ class TestDiff(TestSynkrotron):
                               'Comparing 4 local files against 3 remote files...',
                               '--> dir [remote file does not exist]',
                               '--> dir/file_ä (8.0 B) [remote file does not exist]',
-                              '<-> file_ä (7.0 B/7.0 B) [files have the same timestamp but different content]',
+                              '<-> file_ä (7.0 B/7.0 B) [files have different content; files have the same timestamp',
+                              '    local file hash:  9a0364b9e99bb480dd25e1f0284c8555',
+                              '    remote file hash: d57830865b3020a563b955b27320c31e]',
                               '<-- test [local file does not exist]',
                               'pull: 1 files (0.0 B)',
                               'push: 2 files (8.0 B)\n'))

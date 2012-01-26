@@ -251,18 +251,22 @@ class Repo:
                 st = os.stat(file)
             else:
                 st = os.lstat(file)
-            file_type = 'x'
+            file_type = None
             if stat.S_ISDIR(st.st_mode):
                 file_type = 'd'
             elif stat.S_ISREG(st.st_mode):
                 file_type = 'f'
-            if stat.S_ISLNK(st.st_mode): # not self.follow_links and 
+            if stat.S_ISLNK(st.st_mode):
                 file_type = 'l'
+            if file_type is None:
+                raise Exception('unknown file type')
             return path, (file_type, st.st_size, st.st_mtime)
         base = os.path.join(self.root, self.rel_path)
-        if not os.path.exists(base):
+        try:
+            yield info(base)
+        except:
+            print('warning: ignoring file "%s" (unable to stat)' % os.path.normpath(base))
             return
-        yield info(base)
         for dirpath, dirnames, filenames in os.walk(base, followlinks=self.follow_links):
             for names in (dirnames, filenames):
                 names.sort()
@@ -347,7 +351,7 @@ class Repo:
                 if not chunk:
                     break
                 md5.update(chunk)
-            return md5.digest()
+            return md5.hexdigest()
 
 
 class Diff:
@@ -453,15 +457,34 @@ class Diff:
     
     def _compare_stats(self, stat_src, stat_dst, file):
         if stat_src[0] == stat_dst[0] == 'd':
-            return None
+            return None # do not compare directories
+        # compare time
+        diff_time = int(stat_src[2] - stat_dst[2]) # ignore fractional time information
+        if abs(diff_time) < self.modify_window:
+            diff_time = 0
+        if diff_time < 0:
+            time_cmp = stat_dst, 'pull', 'remote file is newer'
+        elif diff_time > 0:
+            time_cmp = stat_src, 'push', 'local file is newer'
+        else:
+            time_cmp = (stat_src, stat_dst), None, 'files have the same timestamp'
+        if not self.ignore_time and diff_time:
+            return time_cmp
+        # compare type
+        diff_type = ord(stat_src[0]) - ord(stat_dst[0])
+        if diff_type:
+            file_types = {'d': 'directory', 'f': 'regular file', 'l': 'symbolic link'}
+            return (time_cmp[0], 
+                    time_cmp[1] if diff_time else 'type', 
+                    'files have different types (local: %s, remote: %s); %s' % (file_types[stat_src[0]], file_types[stat_dst[0]], time_cmp[2]))
+        # compare size
         diff_size = stat_src[1] - stat_dst[1]
-        diff_time = int(stat_src[2] - stat_dst[2])
-        if diff_size or (not self.ignore_time and abs(diff_time) > self.modify_window):
-            if diff_time < 0:
-                return stat_dst, 'pull', 'remote file is newer'
-            else:
-                return stat_src, 'push', 'local file is newer'
-        elif self.content:
+        if diff_size:
+            return (time_cmp[0], 
+                    time_cmp[1] if diff_time else 'size', 
+                    'files have different sizes (local: %s, remote: %s); %s' % (file_types[stat_src[0]], file_types[stat_dst[0]], time_cmp[2]))
+        # compare content
+        if self.content:
             if not isinstance(self.repo_remote.source, str) and not self.repo_remote.source.is_local() and self.repo_remote.source.key:
                 file_encrypted = self.repo_remote.source.encrypt_names([file])[0]
                 file_local = os.path.join(self.repo_remote.source.encfs_reverse, file_encrypted)
@@ -471,7 +494,9 @@ class Diff:
                 hash_local = executor.submit(self.repo_local.file_hash, file_local)
                 hash_remote = executor.submit(self.repo_remote.file_hash, file)
             if hash_local.result() != hash_remote.result():
-                return (stat_src, stat_dst), 'content', 'files have the same timestamp but different content'
+                return (time_cmp[0], 
+                        time_cmp[1] if diff_time else 'content', 
+                        'files have different content; %s\n    local file hash:  %s\n    remote file hash: %s' % (time_cmp[2], hash_local.result(), hash_remote.result()))
         return None
     
     def pull(self, *, simulate=False, delete=False):

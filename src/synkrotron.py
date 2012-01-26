@@ -414,7 +414,7 @@ class Diff:
         return self.list
     
     def _print_stats(self):
-        pull_count = pull_size = push_count = push_size = 0
+        pull_count = pull_size = push_count = push_size = rest_count = rest_size_local = rest_size_remote = 0
         for _, stat, operation, _ in self.list:
             if operation == 'push':
                 if stat[0] == 'f':
@@ -424,8 +424,16 @@ class Diff:
                 if stat[0] == 'f':
                     pull_size += stat[1]
                 pull_count += 1
+            else:
+                if stat[0][0] == 'f':
+                    rest_size_local += stat[0][1]
+                if stat[1][0] == 'f':
+                    rest_size_remote += stat[1][1]
+                rest_count += 1
         print('pull: %d files (%s)' % (pull_count, self._format_size(pull_size)))
         print('push: %d files (%s)' % (push_count, self._format_size(push_size)))
+        if rest_count:
+            print('rest: %d files (local: %s, remote: %s)' % (rest_count, self._format_size(rest_size_local), self._format_size(rest_size_remote)))
     
     @staticmethod
     def _show_item(file, stat, operation, verbose_info, show_verbose):

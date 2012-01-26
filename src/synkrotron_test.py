@@ -288,7 +288,9 @@ class TestDiff(TestSynkrotron):
                               '<-> file_ä (7.0 B/7.0 B)',
                               '<-- test',
                               'pull: 1 files (0.0 B)',
-                              'push: 2 files (8.0 B)\n'))
+                              'push: 2 files (8.0 B)',
+                              'rest: 1 files (local: 7.0 B, remote: 7.0 B)',
+                              ''))
         self.assertEqual(expected, output.getvalue())
         output = io.StringIO()
         sys.stdout = output
@@ -302,7 +304,9 @@ class TestDiff(TestSynkrotron):
                               '    remote file hash: d57830865b3020a563b955b27320c31e]',
                               '<-- test [local file does not exist]',
                               'pull: 1 files (0.0 B)',
-                              'push: 2 files (8.0 B)\n'))
+                              'push: 2 files (8.0 B)',
+                              'rest: 1 files (local: 7.0 B, remote: 7.0 B)',
+                              ''))
         self.assertEqual(expected, output.getvalue())
         sys.stdout = stdout
     

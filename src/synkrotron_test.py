@@ -356,18 +356,18 @@ class TestRepo(TestSynkrotron):
         self._populate(self.remote)
         os.symlink(self.remote, os.path.join(self.local1_base, 'link'))
         files = Repo(self.local1_base).collect()
+        self.assertEqual(8, len(files))
+        self.assertEqual('d', files['link'][0])
+        self.assertEqual(('f', 8), files['link/dir/file_ä'][:2])
+        self.assertEqual(('f', 7), files['link/file_ä'][:2])
+        self.assertEqual('d', files['link/dir'][0])
+        files = Repo(self.local1_base, preserve_links=True).collect()
         self.assertEqual(5, len(files))
         self.assertEqual('d', files['.'][0])
         self.assertEqual(('f', 8), files['dir/file_ä'][:2])
         self.assertEqual(('f', 7), files['file_ä'][:2])
         self.assertEqual('d', files['dir'][0])
         self.assertEqual('l', files['link'][0])
-        files = Repo(self.local1_base, follow_links=True).collect()
-        self.assertEqual(8, len(files))
-        self.assertEqual('d', files['link'][0])
-        self.assertEqual(('f', 8), files['link/dir/file_ä'][:2])
-        self.assertEqual(('f', 7), files['link/file_ä'][:2])
-        self.assertEqual('d', files['link/dir'][0])
     
     def test_collect_remote(self):
         self._populate(self.remote)
@@ -556,7 +556,7 @@ class TestConfig(TestSynkrotron):
         self.assertEqual(0, config.remotes['remote']['ignore_time'])
         self.assertEqual('', config.remotes['remote']['exclude'])
         self.assertEqual(0, config.remotes['remote']['modify_window'])
-        self.assertEqual(0, config.remotes['remote']['follow_links'])
+        self.assertEqual(0, config.remotes['remote']['preserve_links'])
         self.assertEqual(0, config.remotes['remote']['content'])
 
 
@@ -640,7 +640,7 @@ class TestMain(TestSynkrotron):
         sys.argv[1:] = ['umount', 'remote']
         synkrotron.main()
     
-    def test_main_push_delta_key(self):
+    def _main_push_delta_key(self, path=None):
         self._populate(self.local3_base)
         os.chdir(self.local3_base)
         # push files to remote
@@ -649,6 +649,8 @@ class TestMain(TestSynkrotron):
         os.makedirs(os.path.join(self.local3_base, 'dir', 'new'))
         # push changes to delta
         sys.argv[1:] = ['push', 'remote', '-u', '--delta=%s' % self.delta]
+        if path:
+            sys.argv.append('--path=' + path)
         synkrotron.main()
         # check delta files
         r = Remote('remote', self.remote_host, self.local3_ms, key=self.key, mount_point=self.mount_point)
@@ -664,6 +666,12 @@ class TestMain(TestSynkrotron):
         # check remote files (should be the same now (encrypted of course) as the ones in self.local3_base)
         self.assertEqual(0, len(Diff(Repo(self.local3_base), Repo(r)).compute()))
         r.umount()
+    
+    def test_main_push_delta_key(self):
+        self._main_push_delta_key()
+    
+    def test_main_push_delta_key_path(self):
+        self._main_push_delta_key('dir/new')
     
 
 if __name__ == "__main__":

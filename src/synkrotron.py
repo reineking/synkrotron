@@ -202,18 +202,18 @@ class Repo:
     Note that parts of this class are executed on the remote side and must therefore not reference any other parts of the code.
     """
     
-    def __init__(self, source, *, follow_links=False, exclude=None, rel_path='.'):
+    def __init__(self, source, *, preserve_links=False, exclude=None, rel_path='.'):
         """
         Create a directory wrapper.
         
         source: either a Remote object or a path referring to a local directory
-        follow_links: determines whether symbolic links are followed or not
+        preserve_links: determines whether symbolic links are followed or not
         exclude: list or string of exclude patterns (optional, in case of a string, patterns are separated by ":")
         rel_path: relative path within the directory, all other files are ignored (optional)
         """
         self.source = source
         self.rel_path = rel_path
-        self.follow_links = follow_links
+        self.preserve_links = preserve_links
         if exclude is None:
             self.exclude = []
         elif isinstance(exclude, str):
@@ -247,10 +247,10 @@ class Repo:
     def _collect_local(self):
         def info(file):
             path = os.path.normpath(os.path.relpath(file, self.root))
-            if self.follow_links:
-                st = os.stat(file)
-            else:
+            if self.preserve_links:
                 st = os.lstat(file)
+            else:
+                st = os.stat(file)
             file_type = None
             if stat.S_ISDIR(st.st_mode):
                 file_type = 'd'
@@ -267,7 +267,7 @@ class Repo:
         except:
             print('warning: ignoring file "%s" (unable to stat)' % os.path.normpath(base))
             return
-        for dirpath, dirnames, filenames in os.walk(base, followlinks=self.follow_links):
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=not self.preserve_links):
             for names in (dirnames, filenames):
                 names.sort()
                 rel_dir = os.path.relpath(dirpath, self.root)
@@ -283,8 +283,8 @@ class Repo:
     
     def _collect_remote(self):
         def call(exclude, rel_path):
-            return self._remote_call("Repo('''%s''',follow_links=%d,exclude=%s,rel_path='''%s''').collect()"
-                                      % (self.source.root, self.follow_links, exclude, rel_path))
+            return self._remote_call("Repo('''%s''',preserve_links=%d,exclude=%s,rel_path='''%s''').collect()"
+                                      % (self.source.root, self.preserve_links, exclude, rel_path))
         if self.source.key:
             exclude_fixed = [exc for exc in self.exclude if '*' not in exc] # excludes without wildcards
             rel_path_encrypted, *exclude_encrypted = self.source.encrypt_names([self.rel_path] + exclude_fixed)
@@ -549,7 +549,7 @@ class Diff:
             Config.write_delta_config(name=remote.name,
                                       location=remote.location, 
                                       ignore_time=self.ignore_time, 
-                                      follow_links=self.repo_remote.follow_links, 
+                                      preserve_links=self.repo_remote.preserve_links, 
                                       modify_window=self.modify_window, 
                                       content=self.content, 
                                       config_file=config_file)
@@ -585,7 +585,7 @@ class Diff:
         options = []
         if simulate:
             options.append('--dry-run')
-        if self.repo_local.follow_links:
+        if not self.repo_local.preserve_links:
             options.append('--copy-links')
         if delta:
             dst = delta
@@ -600,7 +600,7 @@ class Config:
                  'mount_point': '',
                  'ignore_time': '0',
                  'delete': '0',
-                 'follow_links': '0',
+                 'preserve_links': '0',
                  'exclude': '',
                  'modify_window': '0',
                  'content': '0'}
@@ -645,13 +645,13 @@ class Config:
                 self.remotes[remote][opt] = int(self.remotes[remote][opt]) # convert to int
     
     @staticmethod
-    def write_delta_config(*, name, location, ignore_time, follow_links, modify_window, content, config_file):
+    def write_delta_config(*, name, location, ignore_time, preserve_links, modify_window, content, config_file):
         """ Write config file to delta location."""
         config = configparser.ConfigParser()
         config.add_section(name)
         config.set(name, 'location', location)
         config.set(name, 'ignore_time', str(ignore_time))
-        config.set(name, 'follow_links', str(follow_links))
+        config.set(name, 'preserve_links', str(preserve_links))
         config.set(name, 'modify_window', str(modify_window))
         config.set(name, 'content', str(content))
         with io.open(config_file, 'w') as f:
@@ -661,59 +661,46 @@ class Config:
     def init_remote(remote):
         """Create or update a remote directory configuration."""
         sync_dir = os.path.join(os.getcwd(), '.synkrotron')
-        if not os.path.exists(dir):
+        if not os.path.exists(sync_dir):
             os.mkdir(sync_dir)
         config_file = os.path.join(sync_dir, 'config')
         if not os.path.exists(config_file):
             print('Creating new configuration')
-            with io.open(config_file, 'w'):
-                pass
+            comments = '\n'.join(('# Synkrotron configuration file defining remote locations.',
+                                  '# ',
+                                  '# Each remote location is defined in a separate section starting with [<remote-name>].',
+                                  '# A section name identifies the remote location must be unique.'
+                                  '# The location itself is specified using the syntax "HOST:PATH" where "HOST:" is optional.',
+                                  '# ',
+                                  '# In addition, the following options can be specified in a section:',
+                                  '#   content:        Additionally compare files based on hashes of their contents if set to "1" (default is "0").',
+                                  '#                   Equivalent to using the "-c" command line switch.',
+                                  '#                   [Warning: Computing content hashes comes with a significant performance penalty.]',
+                                  '#   delete:         Delete all files at the destination that do not exist at the source location if set to "1" (default is "0").',
+                                  '#                   Equivalent to using the "-d" command line switch.',
+                                  '#   exclude:        List of file patterns (separated by ":") for excluding files from the synchronization.',
+                                  '#   preserve_links: Do not follow symbolic links during synchronization if set to "1" (default is "0").',
+                                  '#   ignore_time:    Ignore modification timestamps when comparing files if set to "1" (default is "0").',
+                                  '#   key:            Password of arbitrary length for encrypting files at the remote location.',
+                                  '#                   Equivalent to using the "-i" command line switch.',
+                                  '#   modify_window:  Maximum allowed modification time difference (in seconds) for files to be considered unchanged (default is "0").',
+                                  '#   mount_point:    Mount the remote location at the specified mount point instead of mounting it in the ".synkrotron" directory.',
+                                  '# ',
+                                  '# Example:',
+                                  '# [backup]',
+                                  '# location: foo.org:/some/path',
+                                  '# key: some_passphrase',
+                                  '# exclude: *.log:*.bak',
+                                  '# ',
+                                  ''))
+            with io.open(config_file, 'w') as f:
+                f.write(comments)
         else:
             print('Updating existing configuration')
-        print('(Hint: You can change all options by editing the file ".synkrotron/config".)')
-        config = configparser.ConfigParser()
-        config.read(config_file)
-        if remote not in config:
-            config[remote] = Config._defaults
-        while (True):
-            if config[remote]['location']:
-                default = ' (default is "%s")' % config[remote]['location']
-            else:
-                default = ''
-            result = input('Location of the remote repository [use the format "HOST:PATH" where "HOST:" is optional%s]: ' % default)
-            if result:
-                config[remote]['location'] = result
-            if config[remote]['location']:
-                break
-            else:
-                print('location cannot be empty')
-        config[remote]['key'] = input('Password [encrypt all files at the remote location] (default is "%s"): ' % config[remote]['key'])
-        config[remote]['mount_point'] = input('Mount point [mount the repository at a specific location] (default is "%s"): ' % config[remote]['mount_point'])
-        config[remote]['exclude'] = input('Exclude patterns [optional: exclude specific files/directories, use ":" to specify multiple patterns] (default is "%s"): ' % config[remote]['exclude'])
-        def number(prompt, binary=False):
-            while (True):
-                result = input(prompt)
-                if binary and result in {'0', '1'}:
-                    return result
-                elif not result:
-                    return '0'
-                elif not binary:
-                    try:
-                        return result
-                    except ValueError:
-                        pass
-                if binary:
-                    print('Only "0" and "1" are allowed')
-                else:
-                    print('Expected a valid number')
-        config[remote]['delete'] = number('Delete switch [optional: enter "1" if files that do not exist at the source location should be deleted at the destination] (default is "%s"): ' % config[remote]['delete'], True)
-        config[remote]['ignore_time'] = number('Ignore time switch [optional: enter "1" for ignoring file modification times during synchronization] (default is "%s"): ' % config[remote]['ignore_time'], True)
-        config[remote]['follow_links'] = number('Follow link switch [optional: enter "1" if symbolic links should be followed during synchronization] (default is "%s"): ' % config[remote]['follow_links'], True)
-        config[remote]['content'] = number('Content switch [optional: enter "1" for additionally comparing files based on checksums at the cost of a significant performance penalty] (default is "%s"): ' % config[remote]['content'], True)
-        config[remote]['modify_window'] = number('Modification window [optional: maximum allowed modification time difference (in seconds) for files to be considered unchanged] (default is "%s"): ' % config[remote]['modify_window'])
-        with io.open(config_file, 'w') as f:
-            config.write(f)
-
+        with io.open(config_file, 'a') as f:
+            f.write('\n[%s]\nlocation: <HOST>:<PATH>\n' % remote)
+        print('Please edit ".synkrotron/config" to configure the new remote location.')
+    
 
 def execute(args, *, process_input=None, cwd=None, return_stdout=False, env=None):
     """
@@ -781,8 +768,8 @@ def main():
                 rel_path = os.path.normpath(os.path.join(config.rel_cwd, args.path))
             else:
                 rel_path = config.rel_cwd
-            repo_local = Repo(config.root, follow_links=remote_config['follow_links'], exclude=remote_config['exclude'], rel_path=rel_path)
-            repo_remote = Repo(remote, follow_links=remote_config['follow_links'], exclude=remote_config['exclude'], rel_path=rel_path)
+            repo_local = Repo(config.root, preserve_links=remote_config['preserve_links'], exclude=remote_config['exclude'], rel_path=rel_path)
+            repo_remote = Repo(remote, preserve_links=remote_config['preserve_links'], exclude=remote_config['exclude'], rel_path=rel_path)
             ignore_time = args.ignore_time or remote_config['ignore_time']
             content = args.content or remote_config['content']
             if content and remote.key:

@@ -262,6 +262,10 @@ class Repo:
                 raise Exception('unknown file type')
             return path, (file_type, st.st_size, st.st_mtime)
         base = os.path.join(self.root, self.rel_path)
+        if self.exclude:
+            # check whether base (and thus everything) should be excluded
+            if list(self._ignore_files(self.rel_path, ['.'])):
+                return
         try:
             yield info(base)
         except:
@@ -516,13 +520,14 @@ class Diff:
         """
         self._copy(operation='pull', simulate=simulate, delete=delete)
     
-    def push(self, *, simulate=False, delete=False, delta=None):
+    def push(self, *, simulate=False, delete=False, delta=None, write_delta_config=True):
         """
         Push differing files from the local directory to the remote directory using rsync.
         
         simulate: run rsync in simulation mode
         delete: delete files that exist on the remote side but not locally
         delta: copy all differing files to this path instead of copying them to the remote directory
+        write_delta_config: write configuration in delta mode
         """
         if delta:
             if ':' in delta:
@@ -542,17 +547,18 @@ class Diff:
         self._copy(operation='push', simulate=simulate, delete=delete, delta=delta_path)
         if delta:
             delta_remote.umount()
-            # create '.synkrotron' files in delta directory
-            sync_dir = os.path.join(delta, '.synkrotron')
-            os.mkdir(sync_dir)
-            config_file = os.path.join(sync_dir, 'config')
-            Config.write_delta_config(name=remote.name,
-                                      location=remote.location, 
-                                      ignore_time=self.ignore_time, 
-                                      preserve_links=self.repo_remote.preserve_links, 
-                                      modify_window=self.modify_window, 
-                                      content=self.content, 
-                                      config_file=config_file)
+            if write_delta_config:
+                # create '.synkrotron' files in delta directory
+                sync_dir = os.path.join(delta, '.synkrotron')
+                os.mkdir(sync_dir)
+                config_file = os.path.join(sync_dir, 'config')
+                Config.write_delta_config(name=remote.name,
+                                          location=remote.location, 
+                                          ignore_time=self.ignore_time, 
+                                          preserve_links=self.repo_remote.preserve_links, 
+                                          modify_window=self.modify_window, 
+                                          content=self.content, 
+                                          config_file=config_file)
     
     def _copy(self, *, operation, simulate=False, delete=False, delta=None):
         """Copy files from src to dst using rsync."""
@@ -603,7 +609,8 @@ class Config:
                  'preserve_links': '0',
                  'exclude': '',
                  'modify_window': '0',
-                 'content': '0'}
+                 'content': '0',
+                 'clear': ''}
      
     def __init__(self, cwd=None):
         """
@@ -673,12 +680,15 @@ class Config:
                                   '# The location itself is specified using the syntax "HOST:PATH" where "HOST:" is optional.',
                                   '# ',
                                   '# In addition, the following options can be specified in a section:',
+                                  '#   clear:          List of files (separated by ":") to be excluded from encryption if key is set.',
                                   '#   content:        Additionally compare files based on hashes of their contents if set to "1" (default is "0").',
                                   '#                   Equivalent to using the "-c" command line switch.',
                                   '#                   [Warning: Computing content hashes comes with a significant performance penalty.]',
                                   '#   delete:         Delete all files at the destination that do not exist at the source location if set to "1" (default is "0").',
                                   '#                   Equivalent to using the "-d" command line switch.',
                                   '#   exclude:        List of file patterns (separated by ":") for excluding files from the synchronization.',
+                                  '#                   Supports wildcard characters like "?" and "*".',
+                                  '#                   A "/" at the beginning of a pattern means it is matched starting from the root of the location.',
                                   '#   preserve_links: Do not follow symbolic links during synchronization if set to "1" (default is "0").',
                                   '#   ignore_time:    Ignore modification timestamps when comparing files if set to "1" (default is "0").',
                                   '#   key:            Password of arbitrary length for encrypting files at the remote location.',
@@ -751,41 +761,87 @@ def main():
         signal.signal(signal.SIGINT, lambda signal, frame: sys.exit(0))
         args = parse_args()
         if args.command == 'init':
+            # initialize remote location and exit
             Config.init_remote(args.remote)
-            exit()
-        config = Config()
+            return
+        config = Config() # read configuration
         if args.remote not in config.remotes:
             raise Exception('unknown remote name "%s"' % args.remote)
         remote_config = config.remotes[args.remote]
+        # create remote location wrapper
         remote = Remote(args.remote, remote_config['location'], config.sync_dir, key=remote_config['key'], mount_point=remote_config['mount_point'])
         if args.command == 'umount':
+            # unmount remote location and exit
             remote.umount()
+            return
+        remote.mount() # mount remote location
+        if args.command == 'mount':
+            # exit after mounting
+            return
+        # set options
+        clear_paths = remote_config['clear']
+        content = args.content or remote_config['content']
+        delete = args.delete or remote_config['delete']
+        exclude = remote_config['exclude']
+        ignore_time = args.ignore_time or remote_config['ignore_time']
+        modify_window = remote_config['modify_window']
+        preserve_links = remote_config['preserve_links']
+        # restrict synchronization to rel_path:
+        if args.path:
+            if args.path[0] == '/':
+                print('warning: removing leading "/" from path argument')
+                args.path = args.path[1:]
+            rel_path = os.path.normpath(os.path.join(config.rel_cwd, args.path))
         else:
-            remote.mount()
-            if args.command == 'mount':
-                return
-            if args.path:
-                rel_path = os.path.normpath(os.path.join(config.rel_cwd, args.path))
-            else:
-                rel_path = config.rel_cwd
-            repo_local = Repo(config.root, preserve_links=remote_config['preserve_links'], exclude=remote_config['exclude'], rel_path=rel_path)
-            repo_remote = Repo(remote, preserve_links=remote_config['preserve_links'], exclude=remote_config['exclude'], rel_path=rel_path)
-            ignore_time = args.ignore_time or remote_config['ignore_time']
-            content = args.content or remote_config['content']
-            if content and remote.key:
-                remote.reverse_mount()
-            diff = Diff(repo_local, repo_remote, ignore_time=ignore_time, content=content, modify_window=remote_config['modify_window'])
+            rel_path = config.rel_cwd
+        if remote.key and clear_paths:
+            # exclude (absolute) clear paths in case encryption is used
+            if exclude:
+                exclude += ':'
+            exclude_local = exclude + ':'.join(['/' + p for p in clear_paths.split(':')])
+        else:
+            exclude_local = exclude
+        if content and remote.key:
+            # reverse mount for encrypted conntent diff
+            remote.reverse_mount()
+        # create Repo objects and compute diff
+        repo_local = Repo(config.root, preserve_links=preserve_links, exclude=exclude_local, rel_path=rel_path)
+        repo_remote = Repo(remote, preserve_links=preserve_links, exclude=exclude, rel_path=rel_path)
+        def process_command(diff, write_delta_config):
+            # perform the reuested operation on a diff object
             diff.compute(args.command == 'diff', args.verbose)
-            if content and remote.key:
-                remote.reverse_umount()
-            delete = args.delete or remote_config['delete']
             if args.command == 'pull':
                 diff.pull(simulate=args.simulate, delete=delete)
             elif args.command == 'push':
-                diff.push(simulate=args.simulate, delete=delete, delta=args.delta)
-            if args.umount:
-                remote.umount()
-            remote.save_cache()
+                diff.push(simulate=args.simulate, delete=delete, delta=args.delta, write_delta_config=write_delta_config)
+        process_command(Diff(repo_local, repo_remote, ignore_time=ignore_time, content=content, modify_window=modify_window), True)
+        if content and remote.key:
+            # unmount (reverse) after encrypted conntent diff
+            remote.reverse_umount()
+        if remote.key and clear_paths:
+            # process unencrypted paths
+            for clear_path in clear_paths.split(':'):
+                clear_path = os.path.normpath(clear_path) # remove trailing "/" etc.
+                if clear_path.startswith('..'):
+                    raise Exception(print('clear option "%s" points outside of the main directory' % clear_path))
+                if clear_path.startswith('/'):
+                    print('warning: removing leading "/" from clear option "%s"' % clear_path)
+                    clear_path = clear_path[1:]
+                rel_clear_path = clear_path
+                if rel_path != '.' and not clear_path.startswith(rel_path):
+                    if rel_path.startswith(clear_path):
+                        rel_clear_path = rel_path
+                    else:
+                        continue # omit if rel_path is outside of clear_path
+                print('processing unencrypted files at "%s"' % clear_path)
+                repo_local_clear = Repo(config.root, preserve_links=preserve_links, exclude=exclude, rel_path=rel_clear_path)
+                remote_clear = Remote('', os.path.join(config.root, remote.encfs_source), config.sync_dir)
+                remote_clear.mount() # does nothing but setting the mount path
+                repo_remote_clear = Repo(remote_clear, preserve_links=preserve_links, exclude=exclude, rel_path=rel_clear_path)
+                process_command(Diff(repo_local_clear, repo_remote_clear, ignore_time=ignore_time, content=content, modify_window=modify_window), False)
+        if args.umount:
+            remote.umount()
+        remote.save_cache()
     except Exception as e:
         print('error: ' + str(e))
 

@@ -75,6 +75,7 @@ class TestSynkrotron(unittest.TestCase):
         self.key = 'WeakPassword'
         self.mount_point = os.path.join(self.dir, 'mount_point')
         self.local3_base, self.local3_ms, self.local3_config = create_local('local3', location=self.remote_host, key=self.key, mount_point=self.mount_point)
+        self.local4_base, self.local4_ms, self.local4_config = create_local('local4', location=self.remote_host, key=self.key, clear='dir:clear')
         self.delta = os.path.join(self.dir, 'delta')
         os.mkdir(self.delta)
     
@@ -548,7 +549,7 @@ class TestConfig(TestSynkrotron):
     def test_remotes(self):
         config = Config(self.local1_base)
         self.assertEqual(1, len(config.remotes))
-        self.assertEqual(9, len(config.remotes['remote']))
+        self.assertEqual(10, len(config.remotes['remote']))
         self.assertEqual(self.remote, config.remotes['remote']['location'])
         self.assertEqual('', config.remotes['remote']['key'])
         self.assertEqual('', config.remotes['remote']['mount_point'])
@@ -558,6 +559,7 @@ class TestConfig(TestSynkrotron):
         self.assertEqual(0, config.remotes['remote']['modify_window'])
         self.assertEqual(0, config.remotes['remote']['preserve_links'])
         self.assertEqual(0, config.remotes['remote']['content'])
+        self.assertEqual('', config.remotes['remote']['clear'])
 
 
 class TestMain(TestSynkrotron):
@@ -672,6 +674,28 @@ class TestMain(TestSynkrotron):
     
     def test_main_push_delta_key_path(self):
         self._main_push_delta_key('dir/new')
+    
+    def test_main_push_clear(self):
+        self._populate(self.local4_base)
+        os.chdir(self.local4_base)
+        sys.argv[1:] = ['push', 'remote', '-u']
+        synkrotron.main()
+        # "dir/file_ä" should be unencrypted
+        self.assertListEqual(['file_ä'], os.listdir(os.path.join(self.remote, 'dir')))
+        # "file_ä" should be encrypted
+        r = Remote('remote', self.remote_host, self.local4_ms, key=self.key)
+        r.mount()
+        files = [f for f in os.listdir(self.remote) if f != '.encfs6.xml' and f != 'dir']
+        self.assertListEqual(['file_ä'], r.decrypt_names(files))
+        r.umount()
+    
+    def test_main_push_clear_delta(self):
+        self._populate(self.local4_base)
+        os.chdir(os.path.join(self.local4_base, 'dir'))
+        sys.argv[1:] = ['push', 'remote', '-u', '--path=file_ä', '--delta=%s' % self.delta]
+        synkrotron.main()
+        # "dir/file_ä" should be unencrypted
+        self.assertListEqual(['file_ä'], os.listdir(os.path.join(self.delta, 'dir')))
     
 
 if __name__ == "__main__":

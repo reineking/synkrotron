@@ -22,7 +22,7 @@ Unit tests for "synkrotron.py".
 import configparser
 import io
 import synkrotron
-from synkrotron import Config, Diff, Remote, Repo
+from synkrotron import Config, Diff, DiffStatistics, Remote, Repo
 import os
 import shutil
 import subprocess
@@ -283,8 +283,8 @@ class TestDiff(TestSynkrotron):
         sys.stdout = output
         diff = Diff(Repo(self.local1_base), Repo(self.remote), content=True)
         diff.compute(show=True)
-        expected = '\n'.join(('Comparing 4 local files against 3 remote files...',
-                              '--> dir',
+        DiffStatistics(diff).show()
+        expected = '\n'.join(('--> dir',
                               '--> dir/file_ä (8.0 B)',
                               '<-> file_ä (7.0 B/7.0 B)',
                               '<-- test',
@@ -296,8 +296,8 @@ class TestDiff(TestSynkrotron):
         output = io.StringIO()
         sys.stdout = output
         diff.compute(show=True, show_verbose=True)
-        expected = '\n'.join(('Generating a list of all differing files...',
-                              'Comparing 4 local files against 3 remote files...',
+        DiffStatistics(diff).show()
+        expected = '\n'.join(('Comparing 4 local files against 3 remote files...',
                               '--> dir [remote file does not exist]',
                               '--> dir/file_ä (8.0 B) [remote file does not exist]',
                               '<-> file_ä (7.0 B/7.0 B) [files have different content; files have the same timestamp',

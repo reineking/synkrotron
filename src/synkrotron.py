@@ -266,6 +266,8 @@ class Repo:
             # check whether base (and thus everything) should be excluded
             if list(self._ignore_files(self.rel_path, ['.'])):
                 return
+        if not os.path.exists(base):
+            return
         try:
             yield info(base)
         except:
@@ -358,6 +360,50 @@ class Repo:
             return md5.hexdigest()
 
 
+class DiffStatistics:
+    
+    def __init__(self, diff):
+        self.pull_count = self.pull_size = self.push_count = self.push_size = self.rest_count = self.rest_size_local = self.rest_size_remote = 0
+        if diff is None:
+            return
+        for _, stat, operation, _ in diff.list:
+            if operation == 'push':
+                if stat[0] == 'f':
+                    self.push_size += stat[1]
+                self.push_count += 1
+            elif operation == 'pull':
+                if stat[0] == 'f':
+                    self.pull_size += stat[1]
+                self.pull_count += 1
+            else:
+                if stat[0][0] == 'f':
+                    self.rest_size_local += stat[0][1]
+                if stat[1][0] == 'f':
+                    self.rest_size_remote += stat[1][1]
+                self.rest_count += 1
+    
+    def __add__(self, other):
+        if not isinstance(other, DiffStatistics):
+            raise TypeError
+        ds = DiffStatistics(None)
+        ds.pull_count = self.pull_count + other.pull_count
+        ds.pull_size = self.pull_size + other.pull_size
+        ds.push_count = self.push_count + other.push_count
+        ds.push_size = self.push_size + other.push_size
+        ds.rest_count = self.rest_count + other.rest_count
+        ds.rest_size_local = self.rest_size_local + other.rest_size_local
+        ds.rest_size_remote = self.rest_size_remote + other.rest_size_remote
+        return ds
+    
+    def show(self):
+        if self.pull_count:
+            print('pull: %d files (%s)' % (self.pull_count, Diff._format_size(self.pull_size)))
+        if self.push_count:
+            print('push: %d files (%s)' % (self.push_count, Diff._format_size(self.push_size)))
+        if self.rest_count:
+            print('rest: %d files (local: %s, remote: %s)' % (self.rest_count, Diff._format_size(self.rest_size_local), Diff._format_size(self.rest_size_remote)))
+    
+
 class Diff:
     """Compare and copy files between two directories."""
     
@@ -391,11 +437,9 @@ class Diff:
             If 'show_verbose' is set in addition to 'show', additional information about the cause of the detected difference is printed.
         """
         self.list = []
-        if show and show_verbose:
-            print('Generating a list of all differing files...')
         with futures.ThreadPoolExecutor(max_workers=2) as executor:
             stats_local, stats_remote = executor.map(Repo.collect, [self.repo_local, self.repo_remote])
-        if show:
+        if show and show_verbose:
             print('Comparing %d local files against %d remote files...' % (len(stats_local), len(stats_remote)))
         for file_local, stat_local in sorted(stats_local.items()):
             if file_local in stats_remote:
@@ -413,31 +457,7 @@ class Diff:
             for item in pulls:
                 Diff._show_item(*item, show_verbose=show_verbose)
         self.list.extend(pulls)
-        if show:
-            self._print_stats()
         return self.list
-    
-    def _print_stats(self):
-        pull_count = pull_size = push_count = push_size = rest_count = rest_size_local = rest_size_remote = 0
-        for _, stat, operation, _ in self.list:
-            if operation == 'push':
-                if stat[0] == 'f':
-                    push_size += stat[1]
-                push_count += 1
-            elif operation == 'pull':
-                if stat[0] == 'f':
-                    pull_size += stat[1]
-                pull_count += 1
-            else:
-                if stat[0][0] == 'f':
-                    rest_size_local += stat[0][1]
-                if stat[1][0] == 'f':
-                    rest_size_remote += stat[1][1]
-                rest_count += 1
-        print('pull: %d files (%s)' % (pull_count, self._format_size(pull_size)))
-        print('push: %d files (%s)' % (push_count, self._format_size(push_size)))
-        if rest_count:
-            print('rest: %d files (local: %s, remote: %s)' % (rest_count, self._format_size(rest_size_local), self._format_size(rest_size_remote)))
     
     @staticmethod
     def _show_item(file, stat, operation, verbose_info, show_verbose):
@@ -588,6 +608,8 @@ class Diff:
                     if not simulate:
                         os.remove(os.path.join(dst, f[0]))
         file_list = '\n'.join([f[0] for f in self.list if f[2] != rev_operation])
+        if not file_list:
+            return
         options = []
         if simulate:
             options.append('--dry-run')
@@ -807,9 +829,16 @@ def main():
         # create Repo objects and compute diff
         repo_local = Repo(config.root, preserve_links=preserve_links, exclude=exclude_local, rel_path=rel_path)
         repo_remote = Repo(remote, preserve_links=preserve_links, exclude=exclude, rel_path=rel_path)
+        diff_statistics = None
         def process_command(diff, write_delta_config):
+            nonlocal diff_statistics
             # perform the reuested operation on a diff object
             diff.compute(args.command == 'diff', args.verbose)
+            if args.command == 'diff':
+                if diff_statistics is None:
+                    diff_statistics = DiffStatistics(diff)
+                else:
+                    diff_statistics += DiffStatistics(diff)
             if args.command == 'pull':
                 diff.pull(simulate=args.simulate, delete=delete)
             elif args.command == 'push':
@@ -833,12 +862,15 @@ def main():
                         rel_clear_path = rel_path
                     else:
                         continue # omit if rel_path is outside of clear_path
-                print('processing unencrypted files at "%s"' % clear_path)
+                if args.verbose:
+                    print('processing unencrypted files at "%s"' % clear_path)
                 repo_local_clear = Repo(config.root, preserve_links=preserve_links, exclude=exclude, rel_path=rel_clear_path)
                 remote_clear = Remote('', os.path.join(config.root, remote.encfs_source), config.sync_dir)
                 remote_clear.mount() # does nothing but setting the mount path
                 repo_remote_clear = Repo(remote_clear, preserve_links=preserve_links, exclude=exclude, rel_path=rel_clear_path)
                 process_command(Diff(repo_local_clear, repo_remote_clear, ignore_time=ignore_time, content=content, modify_window=modify_window), False)
+        if args.command == 'diff':
+            diff_statistics.show()
         if args.umount:
             remote.umount()
         remote.save_cache()

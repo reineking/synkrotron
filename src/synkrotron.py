@@ -361,8 +361,10 @@ class Repo:
 
 
 class DiffStatistics:
+    """Compute and show cumulative diff statistics."""
     
     def __init__(self, diff):
+        """Compute statistics from a Diff object."""
         self.pull_count = self.pull_size = self.push_count = self.push_size = self.rest_count = self.rest_size_local = self.rest_size_remote = 0
         if diff is None:
             return
@@ -396,6 +398,7 @@ class DiffStatistics:
         return ds
     
     def show(self):
+        """Print the computed diff statistics."""
         if self.pull_count:
             print('pull: %d files (%s)' % (self.pull_count, Diff._format_size(self.pull_size)))
         if self.push_count:
@@ -623,16 +626,16 @@ class Diff:
 class Config:
     """Find relevant paths and read the configuration file."""
     
-    _defaults = {'location': '',
-                 'key': '',
-                 'mount_point': '',
-                 'ignore_time': '0',
-                 'delete': '0',
-                 'preserve_links': '0',
-                 'exclude': '',
-                 'modify_window': '0',
+    _defaults = {'clear': '',
                  'content': '0',
-                 'clear': ''}
+                 'delete': '0',
+                 'exclude': '',
+                 'ignore_time': '0',
+                 'key': '',
+                 'location': '',
+                 'modify_window': '0',
+                 'mount_point': '',
+                 'preserve_links': '0'}
      
     def __init__(self, cwd=None):
         """
@@ -864,8 +867,12 @@ def main():
                         continue # omit if rel_path is outside of clear_path
                 if args.verbose:
                     print('processing unencrypted files at "%s"' % clear_path)
+                # store clear files in a separate directory in order to avoid name clashes with encrypted files:
+                clear_root = os.path.join(remote.encfs_source, 'clear')
+                if not os.path.exists(clear_root):
+                    os.mkdir(clear_root)
                 repo_local_clear = Repo(config.root, preserve_links=preserve_links, exclude=exclude, rel_path=rel_clear_path)
-                remote_clear = Remote('', os.path.join(config.root, remote.encfs_source), config.sync_dir)
+                remote_clear = Remote('', clear_root, config.sync_dir)
                 remote_clear.mount() # does nothing but setting the mount path
                 repo_remote_clear = Repo(remote_clear, preserve_links=preserve_links, exclude=exclude, rel_path=rel_clear_path)
                 process_command(Diff(repo_local_clear, repo_remote_clear, ignore_time=ignore_time, content=content, modify_window=modify_window), False)

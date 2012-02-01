@@ -681,11 +681,11 @@ class TestMain(TestSynkrotron):
         sys.argv[1:] = ['push', 'remote', '-u']
         synkrotron.main()
         # "dir/file_ä" should be unencrypted
-        self.assertListEqual(['file_ä'], os.listdir(os.path.join(self.remote, 'dir')))
+        self.assertListEqual(['file_ä'], os.listdir(os.path.join(self.remote, 'clear/dir')))
         # "file_ä" should be encrypted
         r = Remote('remote', self.remote_host, self.local4_ms, key=self.key)
         r.mount()
-        files = [f for f in os.listdir(self.remote) if f != '.encfs6.xml' and f != 'dir']
+        files = [f for f in os.listdir(self.remote) if f != '.encfs6.xml' and f != 'clear']
         self.assertListEqual(['file_ä'], r.decrypt_names(files))
         r.umount()
     

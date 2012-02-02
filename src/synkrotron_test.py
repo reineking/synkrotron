@@ -316,10 +316,11 @@ class TestRepo(TestSynkrotron):
     
     def test_exclude(self):
         self.assertEqual(('/.synkrotron',), tuple(Repo(self.local1_base).exclude))
-        self.assertEqual(('/.synkrotron', 'dir'), tuple(Repo(self.local1_base, exclude=['dir']).exclude))
+        self.assertEqual(('dir', '/.synkrotron'), tuple(Repo(self.local1_base, exclude=['dir']).exclude))
     
     def test_ignore_files(self):
         self.assertEqual((), tuple(Repo(self.local1_base)._ignore_files('.', ['a', 'ax'])))
+        # exclude
         self.assertEqual(('a',), tuple(Repo(self.local1_base, exclude=['a'])._ignore_files('.', ['a', 'ax'])))
         self.assertEqual(('a', 'ax'), tuple(Repo(self.local1_base, exclude=['a*'])._ignore_files('.', ['a', 'ax'])))
         self.assertEqual(('a',), tuple(Repo(self.local1_base, exclude=['/a'])._ignore_files('.', ['a', 'ax'])))
@@ -328,6 +329,22 @@ class TestRepo(TestSynkrotron):
         self.assertEqual(('a',), tuple(Repo(self.local1_base, exclude=['dir/a'])._ignore_files('dir', ['a', 'ax'])))
         self.assertEqual(('a',), tuple(Repo(self.local1_base, exclude=['/dir/a'])._ignore_files('dir', ['a', 'ax'])))
         self.assertEqual((), tuple(Repo(self.local1_base, exclude=['/dir/a/x/y'])._ignore_files('dir', ['a', 'ax'])))
+        # include
+        self.assertEqual(('ax',), tuple(Repo(self.local1_base, include=['a'])._ignore_files('.', ['a', 'ax'])))
+        self.assertEqual(('b',), tuple(Repo(self.local1_base, include=['a*'])._ignore_files('.', ['a', 'ax', 'b'])))
+        self.assertEqual(('ax',), tuple(Repo(self.local1_base, include=['/a'])._ignore_files('.', ['a', 'ax'])))
+        self.assertEqual(('a', 'ax'), tuple(Repo(self.local1_base, include=['a'])._ignore_files('dir', ['a', 'ax'])))
+        self.assertEqual(('ax',), tuple(Repo(self.local1_base, include=['dir/a'])._ignore_files('dir', ['a', 'ax'])))
+        self.assertEqual(('b',), tuple(Repo(self.local1_base, include=['dir/a'])._ignore_files('.', ['dir', 'b'])))
+        self.assertEqual(('b',), tuple(Repo(self.local1_base, include=['*/a'])._ignore_files('dir', ['a', 'b'])))
+        self.assertEqual((), tuple(Repo(self.local1_base, include=['*/a/*'])._ignore_files('dir/a', ['a'])))
+        self.assertEqual(('a',), tuple(Repo(self.local1_base, include=['*/a/*'])._ignore_files('dir/b', ['a'])))
+        self.assertEqual((), tuple(Repo(self.local1_base, include=['a'])._ignore_files('.', ['.'])))
+        wl = set()
+        self.assertEqual(('a',), tuple(Repo(self.local1_base, include=['dir'])._ignore_files('.', ['dir', 'a'], wl)))
+        self.assertSetEqual({'dir'}, wl)
+        self.assertEqual((), tuple(Repo(self.local1_base, include=['dir'])._ignore_files('dir', ['a'], wl)))
+        
     
     def test_collect(self):
         self._populate(self.local1_base)
@@ -344,6 +361,32 @@ class TestRepo(TestSynkrotron):
         self.assertEqual(2, len(files))
         self.assertEqual('d', files['dir'][0])
         self.assertEqual('d', files['.'][0])
+    
+    def test_collect_include(self):
+        self._populate(self.local1_base)
+        files = Repo(self.local1_base, include=['file_ä']).collect()
+        self.assertEqual(2, len(files))
+        self.assertEqual('f', files['file_ä'][0])
+        self.assertEqual('d', files['.'][0])
+        files = Repo(self.local1_base, include=['dir']).collect()
+        self.assertEqual(3, len(files))
+        self.assertEqual('f', files['dir/file_ä'][0])
+        self.assertEqual('d', files['dir'][0])
+        self.assertEqual('d', files['.'][0])
+        files = Repo(self.local1_base, include=['d?r']).collect()
+        self.assertEqual(3, len(files))
+        self.assertEqual('f', files['dir/file_ä'][0])
+        self.assertEqual('d', files['dir'][0])
+        self.assertEqual('d', files['.'][0])
+    
+    def test_collect_exclude_include(self):
+        self._populate(self.local1_base)
+        os.mkdir(os.path.join(self.local1_base, 'dir/test'))
+        files = Repo(self.local1_base, exclude=['file_ä'], include=['*ir']).collect()
+        self.assertEqual(3, len(files))
+        self.assertEqual('d', files['dir'][0])
+        self.assertEqual('d', files['.'][0])
+        self.assertEqual('d', files['dir/test'][0])
     
     def test_collect_rel_path(self):
         self._populate(self.local1_base)
@@ -549,7 +592,7 @@ class TestConfig(TestSynkrotron):
     def test_remotes(self):
         config = Config(self.local1_base)
         self.assertEqual(1, len(config.remotes))
-        self.assertEqual(10, len(config.remotes['remote']))
+        self.assertEqual(11, len(config.remotes['remote']))
         self.assertEqual(self.remote, config.remotes['remote']['location'])
         self.assertEqual('', config.remotes['remote']['key'])
         self.assertEqual('', config.remotes['remote']['mount_point'])
@@ -560,6 +603,7 @@ class TestConfig(TestSynkrotron):
         self.assertEqual(0, config.remotes['remote']['preserve_links'])
         self.assertEqual(0, config.remotes['remote']['content'])
         self.assertEqual('', config.remotes['remote']['clear'])
+        self.assertEqual('', config.remotes['remote']['include'])
 
 
 class TestMain(TestSynkrotron):

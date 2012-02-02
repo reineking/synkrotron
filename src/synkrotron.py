@@ -182,6 +182,8 @@ class Remote:
         return self._map_names('encode', filenames)
     
     def _map_names(self, command, filenames):
+        if not filenames:
+            return []
         self._load_cache()
         cache_index = 0 if command == 'decrypt' else 1
         filenames = [fn.split(os.sep) for fn in filenames]
@@ -202,13 +204,14 @@ class Repo:
     Note that parts of this class are executed on the remote side and must therefore not reference any other parts of the code.
     """
     
-    def __init__(self, source, *, preserve_links=False, exclude=None, rel_path='.'):
+    def __init__(self, source, *, preserve_links=False, exclude=None, include=None, rel_path='.'):
         """
         Create a directory wrapper.
         
         source: either a Remote object or a path referring to a local directory
         preserve_links: determines whether symbolic links are followed or not
         exclude: list or string of exclude patterns (optional, in case of a string, patterns are separated by ":")
+        include: list or string of include-only patterns (optional, in case of a string, patterns are separated by ":")
         rel_path: relative path within the directory, all other files are ignored (optional)
         """
         self.source = source
@@ -220,11 +223,21 @@ class Repo:
             self.exclude = exclude.split(':')
         else:
             self.exclude = exclude
-        self.exclude = ['/.synkrotron'] + [pattern[:-1] if pattern[-1] == '/' and len(pattern) > 1 else pattern for pattern in self.exclude if pattern]
-        if isinstance(self.source, str): # remote
-            self.root = source
+        if include is None:
+            self.include = []
+        elif isinstance(include, str):
+            self.include = include.split(':')
         else:
-            self.root = source.mount_path
+            self.include = include
+        # remove leading slashes from include patterns
+        self.include = [pattern[1:] if pattern[0] == '/' else pattern for pattern in self.include if pattern]
+        # normalize patterns (remove trailing slashes etc.)
+        self.exclude = [os.path.normpath(pattern) for pattern in self.exclude if pattern] + ['/.synkrotron']
+        self.include = [os.path.normpath(pattern) for pattern in self.include if pattern]
+        if isinstance(self.source, str):
+            self.root = source # path
+        else:
+            self.root = source.mount_path # remote object
     
     def _remote_call(self, line):
         """
@@ -262,11 +275,11 @@ class Repo:
                 raise Exception('unknown file type')
             return path, (file_type, st.st_size, st.st_mtime)
         base = os.path.join(self.root, self.rel_path)
-        if self.exclude:
-            # check whether base (and thus everything) should be excluded
-            if list(self._ignore_files(self.rel_path, ['.'])):
-                return
+        whitelist_dirs = set() # white-listed directories; avoid re-matching files within these directories
         if not os.path.exists(base):
+            return # nothing to collect if base does not exist
+        # check whether base (and thus everything) should be excluded:
+        if list(self._ignore_files(self.rel_path, ['.'], whitelist_dirs)):
             return
         try:
             yield info(base)
@@ -277,9 +290,8 @@ class Repo:
             for names in (dirnames, filenames):
                 names.sort()
                 rel_dir = os.path.relpath(dirpath, self.root)
-                if self.exclude:
-                    for ign in reversed(list(self._ignore_files(rel_dir, names))):
-                        del names[bisect.bisect_left(names, ign)]
+                for ign in reversed(list(self._ignore_files(rel_dir, names, whitelist_dirs))):
+                    del names[bisect.bisect_left(names, ign)]
                 for name in names:
                     try:
                         file = os.path.join(dirpath, name)
@@ -288,18 +300,25 @@ class Repo:
                         print('warning: ignoring file "%s" (unable to stat)' % os.path.normpath(file))
     
     def _collect_remote(self):
-        def call(exclude, rel_path):
-            return self._remote_call("Repo('''%s''',preserve_links=%d,exclude=%s,rel_path='''%s''').collect()"
-                                      % (self.source.root, self.preserve_links, exclude, rel_path))
+        def call(exclude, include, rel_path):
+            return self._remote_call("list(Repo('''%s''',preserve_links=%d,exclude=%s,include=%s,rel_path='''%s''')._collect_local())"
+                                      % (self.source.root, self.preserve_links, exclude, include, rel_path))
         if self.source.key:
-            exclude_fixed = [exc for exc in self.exclude if '*' not in exc] # excludes without wildcards
-            rel_path_encrypted, *exclude_encrypted = self.source.encrypt_names([self.rel_path] + exclude_fixed)
+            # wildcards can not be applied to encrypted names, so filtering is done in two steps (first without wildcards, then with wildcards)
+            exclude_fixed = [pattern for pattern in self.exclude if '*' not in pattern and '?' not in pattern] # excludes without wildcards
+            include_fixed = [pattern for pattern in self.include if '*' not in pattern and '?' not in pattern] # includes without wildcards
+            # encrypt names in a single call since this is an expensive operation
+            encrypted_names = self.source.encrypt_names(exclude_fixed + include_fixed + [self.rel_path])
+            rel_path_encrypted = encrypted_names[-1]
+            exclude_encrypted = encrypted_names[:len(exclude_fixed)]
+            include_encrypted = encrypted_names[len(exclude_fixed):-1]
             exclude_encrypted.append('/.encfs6.xml')
-            stats_encrypted = list(call(exclude_encrypted, rel_path_encrypted).items())
-            stats_encrypted.sort(key=lambda s: len(s[0]))
+            stats_encrypted = call(exclude_encrypted, include_encrypted, rel_path_encrypted)
             paths = self.source.decrypt_names([s[0] for s in stats_encrypted])
             stats = dict()
             excluded = set()
+            whitelist_dirs = set()
+            # files must be in top-down order
             for path, stat in zip(paths, stats_encrypted):
                 skip = False
                 for e in excluded:
@@ -308,32 +327,72 @@ class Repo:
                         break
                 if skip:
                     continue
-                for _ in self._ignore_files(os.path.dirname(path), [os.path.basename(path)]):
+                for _ in self._ignore_files(os.path.dirname(path), [os.path.basename(path)], whitelist_dirs):
                     excluded.add(path)
                     break
                 else:
                     stats[path] = stat[1]
             return stats
         else:
-            return call(self.exclude, self.rel_path)
+            return call(self.exclude, self.include, self.rel_path)
     
-    def _ignore_files(self, dirpath, filenames):
+    def _ignore_files(self, dirpath, filenames, whitelist_dirs=None):
+        """Return all filenames that should be ignored based on exclude and include patterns."""
+        if not self.exclude and not self.include:
+            return
+        def match(path, pattern):
+            """Match a pattern against a path."""
+            if pattern.startswith('/'): # anchored: match the whole path starting from the repository root
+                if fnmatch.fnmatch(path, pattern[1:]):
+                    return True
+            else: # not anchored: only match the last component of the path
+                tmp_path, tail = os.path.split(path)
+                components = [tail]
+                for _ in range(pattern.count('/')):
+                    tmp_path, tail = os.path.split(tmp_path)
+                    components.append(tail)
+                if fnmatch.fnmatch('/'.join(reversed(components)), pattern):
+                    return True
+            return False
         for fn in filenames:
             path = os.path.normpath(os.path.join(dirpath, fn))
+            if path == '.':
+                continue # always include the root directory
+            ignore = False
+            # match excludes
             for pattern in self.exclude:
-                if pattern[0] == '/': # anchored: match the whole path starting from the repository root
-                    if fnmatch.fnmatch(path, pattern[1:]):
-                        yield fn
+                if match(path, pattern):
+                    yield fn
+                    ignore = True
+                    break
+            if ignore:
+                continue
+            # match includes
+            if self.include:
+                ignore = True
+                if whitelist_dirs is not None:
+                    for wl in whitelist_dirs:
+                        if path.startswith(wl):
+                            ignore = False
+                            break
+                    if not ignore:
+                        continue
+                path_depth = path.count('/')
+                for pattern in self.include:
+                    # match pattern partially in case the pattern is deeper than the path
+                    # (e.g., match only with "foo" if the pattern is "foo/bar" and the path does not contain any slashes)
+                    pattern_depth = pattern.count('/')
+                    if pattern_depth > path_depth:
+                        partial_pattern = '/'.join(pattern.split('/')[:path_depth + 1])
+                    else:
+                        partial_pattern = pattern
+                    if match(path, '/' + partial_pattern): # match (anchored) pattern
+                        if whitelist_dirs is not None and partial_pattern == pattern:
+                            whitelist_dirs.add(path)
+                        ignore = False
                         break
-                else: # not anchored: only match the last component of the path
-                    tmp_path, tail = os.path.split(path)
-                    components = [tail]
-                    for _ in range(pattern.count('/')):
-                        tmp_path, tail = os.path.split(tmp_path)
-                        components.append(tail)
-                    if fnmatch.fnmatch('/'.join(reversed(components)), pattern):
-                        yield fn
-                        break
+                if ignore:
+                    yield fn
     
     def file_hash(self, file):
         """Compute a hash of the corresponding file content."""
@@ -631,6 +690,7 @@ class Config:
                  'delete': '0',
                  'exclude': '',
                  'ignore_time': '0',
+                 'include': '',
                  'key': '',
                  'location': '',
                  'modify_window': '0',
@@ -706,6 +766,8 @@ class Config:
                                   '# ',
                                   '# In addition, the following options can be specified in a section:',
                                   '#   clear:          List of files (separated by ":") to be excluded from encryption if key is set.',
+                                  '#                   Filenames are relative with respect to the root of the synchronization directory.',
+                                  '#                   Leading slashes are ignored.',
                                   '#   content:        Additionally compare files based on hashes of their contents if set to "1" (default is "0").',
                                   '#                   Equivalent to using the "-c" command line switch.',
                                   '#                   [Warning: Computing content hashes comes with a significant performance penalty.]',
@@ -714,8 +776,14 @@ class Config:
                                   '#   exclude:        List of file patterns (separated by ":") for excluding files from the synchronization.',
                                   '#                   Supports wildcard characters like "?" and "*".',
                                   '#                   A "/" at the beginning of a pattern means it is matched starting from the root of the location.',
+                                  '#                   Trailing slashes are ignored.',
                                   '#   preserve_links: Do not follow symbolic links during synchronization if set to "1" (default is "0").',
                                   '#   ignore_time:    Ignore modification timestamps when comparing files if set to "1" (default is "0").',
+                                  '#   include:        Include only the listed files (separated by ":"), i.e., exclude all other files.',
+                                  '#                   Patterns are specified similar to exclude except that they are always matched starting from the root.',
+                                  '#                   Therefore, leading slashes can be omitted.',
+                                  '#                   If a pattern matches a directory, all files within the directory are included as well.',
+                                  '#                   Note that exclude pattern take precedence over include patterns.',
                                   '#   key:            Password of arbitrary length for encrypting files at the remote location.',
                                   '#                   Equivalent to using the "-i" command line switch.',
                                   '#   modify_window:  Maximum allowed modification time difference (in seconds) for files to be considered unchanged (default is "0").',
@@ -726,6 +794,7 @@ class Config:
                                   '# location: foo.org:/some/path',
                                   '# key: some_passphrase',
                                   '# exclude: *.log:*.bak',
+                                  '# clear: public_dir:data/public_file'
                                   '# ',
                                   ''))
             with io.open(config_file, 'w') as f:
@@ -809,6 +878,7 @@ def main():
         delete = args.delete or remote_config['delete']
         exclude = remote_config['exclude']
         ignore_time = args.ignore_time or remote_config['ignore_time']
+        include = remote_config['include']
         modify_window = remote_config['modify_window']
         preserve_links = remote_config['preserve_links']
         # restrict synchronization to rel_path:
@@ -830,8 +900,8 @@ def main():
             # reverse mount for encrypted conntent diff
             remote.reverse_mount()
         # create Repo objects and compute diff
-        repo_local = Repo(config.root, preserve_links=preserve_links, exclude=exclude_local, rel_path=rel_path)
-        repo_remote = Repo(remote, preserve_links=preserve_links, exclude=exclude, rel_path=rel_path)
+        repo_local = Repo(config.root, preserve_links=preserve_links, exclude=exclude_local, include=include, rel_path=rel_path)
+        repo_remote = Repo(remote, preserve_links=preserve_links, exclude=exclude, include=include, rel_path=rel_path)
         diff_statistics = None
         def process_command(diff, write_delta_config):
             nonlocal diff_statistics
@@ -857,7 +927,7 @@ def main():
                 if clear_path.startswith('..'):
                     raise Exception(print('clear option "%s" points outside of the main directory' % clear_path))
                 if clear_path.startswith('/'):
-                    print('warning: removing leading "/" from clear option "%s"' % clear_path)
+                    # ignore leading slashes
                     clear_path = clear_path[1:]
                 rel_clear_path = clear_path
                 if rel_path != '.' and not clear_path.startswith(rel_path):
@@ -871,10 +941,10 @@ def main():
                 clear_root = os.path.join(remote.encfs_source, 'clear')
                 if not os.path.exists(clear_root):
                     os.mkdir(clear_root)
-                repo_local_clear = Repo(config.root, preserve_links=preserve_links, exclude=exclude, rel_path=rel_clear_path)
+                repo_local_clear = Repo(config.root, preserve_links=preserve_links, exclude=exclude, include=include, rel_path=rel_clear_path)
                 remote_clear = Remote('', clear_root, config.sync_dir)
                 remote_clear.mount() # does nothing but setting the mount path
-                repo_remote_clear = Repo(remote_clear, preserve_links=preserve_links, exclude=exclude, rel_path=rel_clear_path)
+                repo_remote_clear = Repo(remote_clear, preserve_links=preserve_links, exclude=exclude, include=include, rel_path=rel_clear_path)
                 process_command(Diff(repo_local_clear, repo_remote_clear, ignore_time=ignore_time, content=content, modify_window=modify_window), False)
         if args.command == 'diff':
             diff_statistics.show()

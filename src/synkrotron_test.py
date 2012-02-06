@@ -680,7 +680,7 @@ class TestMain(TestSynkrotron):
         synkrotron.main()
         with io.open(file_remote, 'r') as f:
             self.assertEqual('content', f.read())
-        sys.argv[1:] = ['push', 'remote', '--content', '--force']
+        sys.argv[1:] = ['push', 'remote', '--content', '--force', '--verbose']
         synkrotron.main()
         with io.open(file_remote, 'r') as f:
             self.assertEqual('xontent', f.read())

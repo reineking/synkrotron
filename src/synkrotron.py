@@ -312,6 +312,7 @@ class Repo:
             exclude_encrypted = encrypted_names[:len(exclude_fixed)]
             include_encrypted = encrypted_names[len(exclude_fixed):-1]
             exclude_encrypted.append('/.encfs6.xml')
+            exclude_encrypted.append('/clear')
             stats_encrypted = call(exclude_encrypted, include_encrypted, rel_path_encrypted)
             paths = self.source.decrypt_names([s[0] for s in stats_encrypted])
             stats = dict()

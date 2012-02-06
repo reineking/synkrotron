@@ -116,18 +116,17 @@ class Remote:
         """Unmount the directory and delete all created mount points."""
         if self.mount_point:
             os.remove(self.mount_point)
+        def fuse_umount(fs_type):
+            path = self._sync_path(fs_type)
+            if os.path.isdir(path):
+                if os.path.ismount(path):
+                    if execute(['fusermount', '-u', path]) != 0:
+                        raise('unmounting %s at %s failed' % (fs_type, path))
+                os.rmdir(path)
         if self.key:
-            path = self._sync_path('encfs')
-            if execute(['fusermount', '-u', path]) != 0:
-                raise('unmounting encfs at %s failed' % path)
-            else:
-                os.rmdir(path)
+            fuse_umount('encfs')
         if not self.is_local():
-            path = self._sync_path('sshfs')
-            if execute(['fusermount', '-u', path]) != 0:
-                raise('unmounting sshfs at %s failed' % path)
-            else:
-                os.rmdir(path)
+            fuse_umount('sshfs')
         self.mount_path = None
     
     def reverse_mount(self):

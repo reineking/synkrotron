@@ -651,10 +651,11 @@ class Diff:
         if operation == 'push':
             src = self.repo_local.root
             dst = self.repo_remote.root
+            rev_operation = 'pull'
         else:
             src = self.repo_remote.root
             dst = self.repo_local.root
-        rev_operation = 'pull' if operation == 'push' else 'push'
+            rev_operation = 'push'
         copy_list = []
         if delete or force:
             # delete: delete all files at the destination that do not exist at the source
@@ -672,7 +673,6 @@ class Diff:
                     delete_file = False
                     if delete and file_operation == rev_operation and file_info.endswith('exist'):
                         delete_file = True
-                        copy_list.append(file)
                     if force and file_operation != operation and not file_info.endswith('exist'):
                         delete_file = True
                         copy_list.append(file)
@@ -684,7 +684,7 @@ class Diff:
                                 os.rmdir(path)
                             else:
                                 os.remove(path)
-            copy_list = '\n'.join(copy_list)
+            copy_list = '\n'.join(reversed(copy_list))
         else:
             copy_list = '\n'.join([f[0] for f in self.list if f[2] == operation])
         if not copy_list:

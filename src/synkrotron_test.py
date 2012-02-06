@@ -240,7 +240,7 @@ class TestDiff(TestSynkrotron):
         self._fix_mtime(self.local2_base)
         diff = Diff(Repo(self.local1_base), Repo(self.local2_base), content=True)
         self.assertEqual((('dir/file_ä', 'content'),), self._filter(diff))
-        diff.push()
+        diff.push(force=True)
         diff = Diff(Repo(self.local1_base), Repo(self.local2_base), content=True)
         self.assertEqual(0, len(diff.compute()))
     
@@ -592,7 +592,7 @@ class TestConfig(TestSynkrotron):
     def test_remotes(self):
         config = Config(self.local1_base)
         self.assertEqual(1, len(config.remotes))
-        self.assertEqual(11, len(config.remotes['remote']))
+        self.assertEqual(12, len(config.remotes['remote']))
         self.assertEqual(self.remote, config.remotes['remote']['location'])
         self.assertEqual('', config.remotes['remote']['key'])
         self.assertEqual('', config.remotes['remote']['mount_point'])
@@ -604,6 +604,7 @@ class TestConfig(TestSynkrotron):
         self.assertEqual(0, config.remotes['remote']['content'])
         self.assertEqual('', config.remotes['remote']['clear'])
         self.assertEqual('', config.remotes['remote']['include'])
+        self.assertEqual(0, config.remotes['remote']['force'])
 
 
 class TestMain(TestSynkrotron):
@@ -675,11 +676,11 @@ class TestMain(TestSynkrotron):
         with io.open(file_local, 'w') as f:
             f.write('xontent')
         os.utime(file_local, (os.path.getatime(file_remote), os.path.getmtime(file_remote)))
-        sys.argv[1:] = ['push', 'remote']
+        sys.argv[1:] = ['push', 'remote', '--force']
         synkrotron.main()
         with io.open(file_remote, 'r') as f:
             self.assertEqual('content', f.read())
-        sys.argv[1:] = ['push', 'remote', '--content']
+        sys.argv[1:] = ['push', 'remote', '--content', '--force']
         synkrotron.main()
         with io.open(file_remote, 'r') as f:
             self.assertEqual('xontent', f.read())

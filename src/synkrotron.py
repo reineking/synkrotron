@@ -593,21 +593,23 @@ class Diff:
                         'files have different content; %s\n    local file hash:  %s\n    remote file hash: %s' % (time_cmp[2], hash_local.result(), hash_remote.result()))
         return None
     
-    def pull(self, *, simulate=False, delete=False):
+    def pull(self, *, simulate=False, delete=False, force=False, verbose=False):
         """
         Pull differing files from the remote directory to the local directory using rsync.
         
         simulate: run rsync in simulation mode
         delete: delete files that exist locally but not on the remote side
+        force: overwrite local files that are newer than the corresponding remote files
         """
-        self._copy(operation='pull', simulate=simulate, delete=delete)
+        self._copy(operation='pull', simulate=simulate, delete=delete, force=force, verbose=verbose)
     
-    def push(self, *, simulate=False, delete=False, delta=None, write_delta_config=True):
+    def push(self, *, simulate=False, delete=False, force=False, verbose=False, delta=None, write_delta_config=True):
         """
         Push differing files from the local directory to the remote directory using rsync.
         
         simulate: run rsync in simulation mode
         delete: delete files that exist on the remote side but not locally
+        force: overwrite remote files that are newer than the corresponding local files
         delta: copy all differing files to this path instead of copying them to the remote directory
         write_delta_config: write configuration in delta mode
         """
@@ -626,7 +628,7 @@ class Diff:
             delta_path = delta_remote.mount_path
         else:
             delta_path = None
-        self._copy(operation='push', simulate=simulate, delete=delete, delta=delta_path)
+        self._copy(operation='push', simulate=simulate, delete=delete, force=force, verbose=verbose, delta=delta_path)
         if delta:
             delta_remote.umount()
             if write_delta_config:
@@ -642,7 +644,7 @@ class Diff:
                                           content=self.content, 
                                           config_file=config_file)
     
-    def _copy(self, *, operation, simulate=False, delete=False, delta=None):
+    def _copy(self, *, operation, simulate=False, delete=False, force=False, verbose=False, delta=None):
         """Copy files from src to dst using rsync."""
         if self.list is None:
             self.compute()
@@ -653,24 +655,39 @@ class Diff:
             src = self.repo_remote.root
             dst = self.repo_local.root
         rev_operation = 'pull' if operation == 'push' else 'push'
-        if delete: # delete all files at the destination that do not exist at the source
-            for f in reversed(self.list):
-                if f[2] == rev_operation:
-                    print('deleting ' + f[0])
-                    if not simulate:
-                        path = os.path.join(dst, f[0])
-                        if os.path.isdir(path):
-                            os.rmdir(path)
-                        else:
-                            os.remove(path)
-        if self.content:
-            for f in self.list:
-                if f[2] == 'content':
-                    print('deleting ' + f[0] + ' (different content)')
-                    if not simulate:
-                        os.remove(os.path.join(dst, f[0]))
-        file_list = '\n'.join([f[0] for f in self.list if f[2] != rev_operation])
-        if not file_list:
+        copy_list = []
+        if delete or force:
+            # delete: delete all files at the destination that do not exist at the source
+            # force: delete destination files that are not older in order to overwrite them with the source files
+            for file, _, file_operation, file_info in reversed(self.list):
+                if file_operation == operation:
+                    copy_list.append(file)
+                else:
+                    if not verbose:
+                        verbose_info = ''
+                    else:
+                        verbose_info = ' [%s]' % file_info
+                    if simulate:
+                        verbose_info += ' (SIMULATION)'
+                    delete_file = False
+                    if delete and file_operation == rev_operation and file_info.endswith('exist'):
+                        delete_file = True
+                        copy_list.append(file)
+                    if force and file_operation != operation and not file_info.endswith('exist'):
+                        delete_file = True
+                        copy_list.append(file)
+                    if delete_file:
+                        print('deleting %s%s' % (file, verbose_info))
+                        if not simulate:
+                            path = os.path.join(dst, file)
+                            if os.path.isdir(path):
+                                os.rmdir(path)
+                            else:
+                                os.remove(path)
+            copy_list = '\n'.join(copy_list)
+        else:
+            copy_list = '\n'.join([f[0] for f in self.list if f[2] == operation])
+        if not copy_list:
             return
         options = []
         if simulate:
@@ -679,7 +696,7 @@ class Diff:
             options.append('--copy-links')
         if delta:
             dst = delta
-        execute(['rsync', '-ahuR', '--files-from=-', '--progress', '--partial-dir', '.rsync-partial'] + options + ['.', dst], cwd=src, process_input=file_list)
+        execute(['rsync', '-ahuR', '--files-from=-', '--progress', '--partial-dir', '.rsync-partial'] + options + ['.', dst], cwd=src, process_input=copy_list)
     
 
 class Config:
@@ -689,6 +706,7 @@ class Config:
                  'content': '0',
                  'delete': '0',
                  'exclude': '',
+                 'force': '0',
                  'ignore_time': '0',
                  'include': '',
                  'key': '',
@@ -777,6 +795,8 @@ class Config:
                                   '#                   Supports wildcard characters like "?" and "*".',
                                   '#                   A "/" at the beginning of a pattern means it is matched starting from the root of the location.',
                                   '#                   Trailing slashes are ignored.',
+                                  '#   force:          Delete all differing files at the destination that are newer or the same age if set to "1" (default is "0").',
+                                  '#                   Equivalent to using the "-f" command line switch.',
                                   '#   preserve_links: Do not follow symbolic links during synchronization if set to "1" (default is "0").',
                                   '#   ignore_time:    Ignore modification timestamps when comparing files if set to "1" (default is "0").',
                                   '#   include:        Include only the listed files (separated by ":"), i.e., exclude all other files.',
@@ -841,7 +861,8 @@ def parse_args():
     parser.add_argument('-i', '--ignore-time', dest='ignore_time', action='store_true', help='ignore time stamps for determining whether files are different')
     parser.add_argument('--delta', dest='delta', help='push only changes to the specified directory')
     parser.add_argument('-c', '--content', action='store_true', help='compare file contents in addition to size and modification time')
-    parser.add_argument('-v', '--verbose', action='store_true', help='print additional diff information')
+    parser.add_argument('-v', '--verbose', action='store_true', help='print additional information')
+    parser.add_argument('-f', '--force', action='store_true', help='overwrite destination files when source files are not newer (during pull or push)')
     if len(sys.argv) == 1:
         parser.print_usage()
         exit()
@@ -867,6 +888,8 @@ def main():
         if args.command == 'umount':
             # unmount remote location and exit
             remote.umount()
+            # in case delta was not unmounted in a previous run, do it now (location is irrelevant here)
+            Remote(remote.name + '-delta', remote.location, remote.sync_dir, key=remote.key).umount()
             return
         remote.mount() # mount remote location
         if args.command == 'mount':
@@ -876,6 +899,7 @@ def main():
         clear_paths = remote_config['clear']
         content = args.content or remote_config['content']
         delete = args.delete or remote_config['delete']
+        force = args.force or remote_config['force']
         exclude = remote_config['exclude']
         ignore_time = args.ignore_time or remote_config['ignore_time']
         include = remote_config['include']
@@ -913,9 +937,9 @@ def main():
                 else:
                     diff_statistics += DiffStatistics(diff)
             if args.command == 'pull':
-                diff.pull(simulate=args.simulate, delete=delete)
+                diff.pull(simulate=args.simulate, delete=delete, force=force, verbose=args.verbose)
             elif args.command == 'push':
-                diff.push(simulate=args.simulate, delete=delete, delta=args.delta, write_delta_config=write_delta_config)
+                diff.push(simulate=args.simulate, delete=delete, force=force, verbose=args.verbose, delta=args.delta, write_delta_config=write_delta_config)
         process_command(Diff(repo_local, repo_remote, ignore_time=ignore_time, content=content, modify_window=modify_window), True)
         if content and remote.key:
             # unmount (reverse) after encrypted conntent diff

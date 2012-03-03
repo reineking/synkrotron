@@ -643,7 +643,8 @@ class Diff:
             if write_delta_config:
                 # create '.synkrotron' files in delta directory
                 sync_dir = os.path.join(delta, '.synkrotron')
-                os.mkdir(sync_dir)
+                if not os.path.exists(sync_dir):
+                    os.mkdir(sync_dir)
                 config_file = os.path.join(sync_dir, 'config')
                 Config.write_delta_config(name=remote.name,
                                           location=remote.location, 

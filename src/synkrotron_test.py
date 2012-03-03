@@ -75,7 +75,7 @@ class TestSynkrotron(unittest.TestCase):
         self.key = 'WeakPassword'
         self.mount_point = os.path.join(self.dir, 'mount_point')
         self.local3_base, self.local3_ms, self.local3_config = create_local('local3', location=self.remote_host, key=self.key, mount_point=self.mount_point)
-        self.local4_base, self.local4_ms, self.local4_config = create_local('local4', location=self.remote_host, key=self.key, clear='dir:clear')
+        self.local4_base, self.local4_ms, self.local4_config = create_local('local4', location=self.remote_host, key=self.key, clear='dir:foo')
         self.delta = os.path.join(self.dir, 'delta')
         os.mkdir(self.delta)
     
@@ -739,8 +739,8 @@ class TestMain(TestSynkrotron):
         os.chdir(os.path.join(self.local4_base, 'dir'))
         sys.argv[1:] = ['push', 'remote', '-u', '--path=file_ä', '--delta=%s' % self.delta]
         synkrotron.main()
-        # "dir/file_ä" should be unencrypted
-        self.assertListEqual(['file_ä'], os.listdir(os.path.join(self.delta, 'dir')))
+        # "clear/dir/file_ä" should be unencrypted
+        self.assertTrue(os.path.exists(os.path.join(self.delta, 'clear/dir/file_ä')))
     
 
 if __name__ == "__main__":

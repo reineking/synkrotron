@@ -273,12 +273,9 @@ class Repo:
             if file_type is None:
                 raise Exception('unknown file type')
             return path, (file_type, st.st_size, st.st_mtime)
-        base = os.path.join(self.root, self.rel_path)
         whitelist_dirs = set() # white-listed directories; avoid re-matching files within these directories
-        if not os.path.exists(base):
-            return # nothing to collect if base does not exist
-        # check whether base (and thus everything) should be excluded:
-        if list(self._ignore_files(self.rel_path, ['.'], whitelist_dirs)):
+        base = os.path.join(self.root, self.rel_path)
+        if not self._include_base(whitelist_dirs):
             return
         try:
             yield info(base)
@@ -297,6 +294,18 @@ class Repo:
                         yield info(file)
                     except:
                         print('warning: ignoring file "%s" (unable to stat)' % os.path.normpath(file))
+    
+    def _include_base(self, whitelist_dirs):
+        base = os.path.join(self.root, self.rel_path)
+        if not os.path.exists(base):
+            return False # nothing to collect if base does not exist
+        path = self.rel_path
+        # check all components of rel_path against exclude patterns
+        while path:
+            path, tail = os.path.split(path)
+            if list(self._ignore_files(path, [tail], whitelist_dirs)):
+                return False
+        return True
     
     def _collect_remote(self):
         def call(exclude, include, rel_path):
@@ -899,6 +908,7 @@ def main():
         clear_paths = remote_config['clear']
         content = args.content or remote_config['content']
         delete = args.delete or remote_config['delete']
+        delta_path = args.delta
         force = args.force or remote_config['force']
         exclude = remote_config['exclude']
         ignore_time = args.ignore_time or remote_config['ignore_time']
@@ -939,12 +949,22 @@ def main():
             if args.command == 'pull':
                 diff.pull(simulate=args.simulate, delete=delete, force=force, verbose=args.verbose)
             elif args.command == 'push':
-                diff.push(simulate=args.simulate, delete=delete, force=force, verbose=args.verbose, delta=args.delta, write_delta_config=write_delta_config)
+                diff.push(simulate=args.simulate, delete=delete, force=force, verbose=args.verbose, delta=delta_path, write_delta_config=write_delta_config)
         process_command(Diff(repo_local, repo_remote, ignore_time=ignore_time, content=content, modify_window=modify_window), True)
         if content and remote.key:
             # unmount (reverse) after encrypted conntent diff
             remote.reverse_umount()
         if remote.key and clear_paths:
+            # store clear files in a separate directory in order to avoid name clashes with encrypted files:
+            clear_root = os.path.join(remote.encfs_source, 'clear')
+            if not os.path.exists(clear_root):
+                os.mkdir(clear_root)
+            remote_clear = Remote('', clear_root, config.sync_dir)
+            remote_clear.mount() # does nothing but setting the mount path
+            if delta_path:
+                delta_path = os.path.join(delta_path, 'clear')
+                if not os.path.exists(delta_path):
+                    os.mkdir(delta_path)
             # process unencrypted paths
             for clear_path in clear_paths.split(':'):
                 clear_path = os.path.normpath(clear_path) # remove trailing "/" etc.
@@ -961,13 +981,7 @@ def main():
                         continue # omit if rel_path is outside of clear_path
                 if args.verbose:
                     print('processing unencrypted files at "%s"' % clear_path)
-                # store clear files in a separate directory in order to avoid name clashes with encrypted files:
-                clear_root = os.path.join(remote.encfs_source, 'clear')
-                if not os.path.exists(clear_root):
-                    os.mkdir(clear_root)
                 repo_local_clear = Repo(config.root, preserve_links=preserve_links, exclude=exclude, include=include, rel_path=rel_clear_path)
-                remote_clear = Remote('', clear_root, config.sync_dir)
-                remote_clear.mount() # does nothing but setting the mount path
                 repo_remote_clear = Repo(remote_clear, preserve_links=preserve_links, exclude=exclude, include=include, rel_path=rel_clear_path)
                 process_command(Diff(repo_local_clear, repo_remote_clear, ignore_time=ignore_time, content=content, modify_window=modify_window), False)
         if args.command == 'diff':

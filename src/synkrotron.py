@@ -585,7 +585,7 @@ class Diff:
         if diff_size:
             return (time_cmp[0], 
                     time_cmp[1] if diff_time else 'size', 
-                    'files have different sizes (local: %s, remote: %s); %s' % (file_types[stat_src[0]], file_types[stat_dst[0]], time_cmp[2]))
+                    'files have different sizes (local: %s, remote: %s); %s' % (Diff._format_size(stat_src[1]), Diff._format_size(stat_dst[1]), time_cmp[2]))
         # compare content
         if self.content:
             if not isinstance(self.repo_remote.source, str) and not self.repo_remote.source.is_local() and self.repo_remote.source.key:
